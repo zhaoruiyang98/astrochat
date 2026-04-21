@@ -1,2 +1,2 @@
-# astro-chat-bot
+# astrochat
 zulip bot
