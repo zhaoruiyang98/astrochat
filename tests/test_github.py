@@ -208,11 +208,11 @@ class GitHubTests(unittest.TestCase):
         entries = self.github.discussions(tasks[0])
         self.assertEqual([entry.id for entry in entries], ["I_1", "E_1", "E_2", "C_1", "E_3"])
         self.assertEqual(
-            [entry.body for entry in entries if entry.is_event],
+            [entry.status_change for entry in entries if entry.is_event],
             [
-                "Project status: (unset) → Backlog",
-                "Project status: Backlog → In progress",
-                "Project status: In progress → Done",
+                ("(unset)", "Backlog"),
+                ("Backlog", "In progress"),
+                ("In progress", "Done"),
             ],
         )
         self.assertEqual(entries[1].author, "github-project-automation")

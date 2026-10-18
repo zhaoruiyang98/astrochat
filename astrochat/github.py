@@ -57,6 +57,7 @@ class Discussion:
     created_at: str
     kind: str
     is_event: bool = False
+    status_change: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -86,12 +87,14 @@ def discussion(node: dict[str, Any], kind: str) -> Discussion:
 def activity(node: dict[str, Any], task: Task) -> Discussion | None:
     """Turn a timeline event into literal text, scoped to this Project."""
     actor = (node.get("actor") or {}).get("login", "deleted-user")
+    status_change = None
     if node["__typename"] == "ProjectV2ItemStatusChangedEvent":
         if (node["project"] or {}).get("id") != task.project_id:
             return None
         previous = node["previousStatus"] or "(unset)"
         current = node["status"] or "(unset)"
-        body = f"Project status: {previous} → {current}"
+        status_change = (previous, current)
+        body = ""
         kind = "Project status"
         if node["wasAutomated"]:
             kind += " · automation"
@@ -100,7 +103,16 @@ def activity(node: dict[str, Any], task: Task) -> Discussion | None:
         assignee = (node["assignee"] or {}).get("login", "deleted-user")
         action = "Assigned to" if node["__typename"] == "AssignedEvent" else "Unassigned from"
         body, kind = f"{action} {assignee}", "Assignment"
-    return Discussion(node["id"], body, task.description.url, actor, node["createdAt"], kind, True)
+    return Discussion(
+        node["id"],
+        body,
+        task.description.url,
+        actor,
+        node["createdAt"],
+        kind,
+        True,
+        status_change=status_change,
+    )
 
 
 class GitHubClient:

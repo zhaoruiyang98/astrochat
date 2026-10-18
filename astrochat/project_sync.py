@@ -45,6 +45,10 @@ def render(task: Task, entry: Discussion, image_urls: dict[str, str] | None = No
         heading += f"\nAssignees: {escape_text(', '.join(task.assignees) or '(unassigned)')}"
     if entry.is_event:
         body = escape_text(entry.body)
+        if entry.status_change is not None:
+            previous, current = entry.status_change
+            transition = f"**{escape_text(previous)}** → **{escape_text(current)}**"
+            body = transition + (f"\n{body}" if body else "")
     else:
         body = (
             convert_github_markdown(entry.body, entry.url, image_urls)
@@ -174,16 +178,15 @@ class ProjectSync:
             self.state.save_observation(task.id, Observation(task.status, assignees, 0))
             return
         changes = []
+        status_change = None
         if previous.status != task.status:
-            changes.append(
-                f"Project status: {previous.status or '(unset)'} → {task.status or '(unset)'}"
-            )
+            status_change = (previous.status or "(unset)", task.status or "(unset)")
         if previous.assignees != assignees:
             changes.append(
                 f"Assignees: {', '.join(previous.assignees) or '(unassigned)'} → "
                 f"{', '.join(assignees) or '(unassigned)'}"
             )
-        if not changes:
+        if not changes and status_change is None:
             return
         sequence = previous.sequence + 1
         entry = Discussion(
@@ -194,6 +197,7 @@ class ProjectSync:
             datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "Observed draft change (polling time; actor unavailable)",
             True,
+            status_change=status_change,
         )
         for part, content in enumerate(split_message(render(task, entry))):
             self.sync_message(

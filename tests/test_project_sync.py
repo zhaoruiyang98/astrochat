@@ -150,22 +150,25 @@ class SyncTests(unittest.TestCase):
                 self.comment,
                 id="E_1",
                 kind="Project status",
-                body="Project status: (unset) → Backlog",
+                body="",
                 is_event=True,
+                status_change=("(unset)", "Backlog"),
             ),
             replace(
                 self.comment,
                 id="E_2",
                 kind="Project status",
-                body="Project status: Backlog → In progress",
+                body="",
                 is_event=True,
+                status_change=("Backlog", "In progress"),
             ),
             replace(
                 self.comment,
                 id="E_3",
                 kind="Project status",
-                body="Project status: In progress → Done",
+                body="",
                 is_event=True,
+                status_change=("In progress", "Done"),
             ),
             replace(
                 self.comment, id="E_4", kind="Assignment", body="Assigned to bob", is_event=True
@@ -177,6 +180,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual((result.sent, result.updated, result.renamed), (4, 1, 1))
         self.assertIn("Project status: Done", self.client.messages[1]["content"])
         self.assertIn("Assignees: alice, bob", self.client.messages[1]["content"])
+        self.assertTrue(self.client.messages[5]["content"].endswith("**In progress** → **Done**"))
         self.assertTrue(
             all(message["topic"] == topic_name(task) for message in self.client.messages.values())
         )
@@ -282,11 +286,13 @@ class SyncTests(unittest.TestCase):
             self.comment,
             body="Assigned to @**all** ![image](https://github.com/user-attachments/assets/x)",
             is_event=True,
+            status_change=("@**all**", "Done → review [again]"),
         )
         for entry in (self.body, event):
             content = render(task, entry)
             self.assertNotIn("@**all**", content)
             self.assertNotIn("![image]", content)
+        self.assertIn("**Done → review &#91;again&#93;**", render(task, event))
 
     def test_draft_polling_tracks_changes_after_baseline_and_keeps_history_on_restart(self):
         draft = replace(self.task, type="DraftIssue", status="Backlog", assignees=("alice",))
@@ -298,7 +304,7 @@ class SyncTests(unittest.TestCase):
         self.github.tasks.return_value = ([changed], 0)
         self.assertEqual(self.service.run_once().sent, 1)
         content = self.client.messages[2]["content"]
-        self.assertIn("Backlog → In progress", content)
+        self.assertIn("**Backlog** → **In progress**", content)
         self.assertIn("Assignees: alice → bob", content)
         self.assertIn("polling time; actor unavailable", content)
         self.github.tasks.return_value = ([replace(changed, status="Done", assignees=())], 0)

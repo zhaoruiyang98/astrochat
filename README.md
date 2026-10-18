@@ -30,7 +30,8 @@
 ### 任务状态与负责人
 
 每个任务的首条镜像消息会显示当前 Project 状态和负责人。Issue / PR 的历史状态与分配事件会一起导入，
-后续每轮同步补充新的事件，例如 `Backlog → In progress`、`In progress → Done`、`Assigned to alice`。
+后续每轮同步补充新的事件，例如 **Backlog** → **In progress**、**In progress** → **Done**、`Assigned to alice`。
+状态变化通知会加粗前后状态名称，让变化更醒目。
 自动化产生的变化也会记录，例如由 `github-project-automation` 移动到 `Done`。
 这些通知发送到该任务的 Topic，不会自动提及同名 Zulip 用户；收到提醒的方式由你的频道和 Topic 通知设置决定。
 
