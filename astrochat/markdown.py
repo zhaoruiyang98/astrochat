@@ -16,7 +16,10 @@ from mistune.renderers.markdown import MarkdownRenderer
 def escape_text(text: str) -> str:
     """Escape literal metadata/prose, including Zulip's mention introducers."""
     text = re.sub(r"@(?=[_*])|@$", "@\u200b", text)
-    return re.sub(r"([\\`*_{}\[\]<>()#!~$])", r"\\\1", text)
+    # Zulip displays Markdown backslash escapes literally. Entities preserve
+    # visible punctuation without accidentally activating Markdown syntax.
+    text = html.escape(text, quote=False)
+    return re.sub(r"[`*\[\]#~$]", lambda match: f"&#{ord(match[0])};", text)
 
 
 def fenced_code(code: str, language: str = "text") -> str:
@@ -133,9 +136,9 @@ class _ZulipRenderer(MarkdownRenderer):
     def block_quote(self, token, state):
         rendered = super().block_quote(token, state)
         # The parser treats GitHub alerts as quoted text. Change only the first
-        # line, after literal brackets have been escaped by text().
+        # line, after literal brackets have been encoded by text().
         return re.sub(
-            r"^> \\\[\\!?(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\\\]",
+            r"^> &#91;!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)&#93;",
             r"> **\1**",
             rendered,
         )
@@ -156,7 +159,7 @@ class _ZulipRenderer(MarkdownRenderer):
         return "\n\n" + fenced_code(token["raw"], "math")
 
     def footnote_ref(self, token, state):
-        return f"\\[{token['attrs']['index']}\\]"
+        return f"&#91;{token['attrs']['index']}&#93;"
 
     def footnotes(self, token, state):
         return "\n\n**Footnotes**\n\n" + self.render_children(token, state)

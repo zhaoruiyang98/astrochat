@@ -1,3 +1,4 @@
+import html
 import unittest
 
 import mistune
@@ -6,6 +7,46 @@ from astrochat.markdown import convert_github_markdown, escape_text, markdown_im
 
 
 class ConversionTests(unittest.TestCase):
+    def test_plain_parentheses_do_not_gain_visible_backslashes(self):
+        source = "Astrochat should be able to synchronize this message : )"
+        self.assertEqual(convert_github_markdown(source), source)
+        self.assertEqual(
+            escape_text("Review (file.py:12) {draft} __init__!"),
+            "Review (file.py:12) {draft} __init__!",
+        )
+
+    def test_existing_backslashes_are_preserved_without_doubling(self):
+        source = r"Path C:\Temp\folder; pattern \d; parenthesis \)"
+        self.assertEqual(escape_text(source), source)
+        self.assertEqual(
+            convert_github_markdown(r"Path C:\Temp\folder; pattern \d"),
+            r"Path C:\Temp\folder; pattern \d",
+        )
+        # GitHub's escaped closing parenthesis means a literal parenthesis.
+        self.assertEqual(convert_github_markdown(r"Hello \)"), "Hello )")
+
+    def test_literal_markdown_uses_entities_without_enabling_formatting(self):
+        source = r"\*literal\* \[label\]\(url\) \# heading \~\~x\~\~ \$\$x\$\$"
+        converted = convert_github_markdown(source)
+        self.assertEqual(html.unescape(converted), "*literal* [label](url) # heading ~~x~~ $$x$$")
+        for syntax in ("*literal*", "[label](url)", "# heading", "~~x~~", "$$x$$", "\\"):
+            self.assertNotIn(syntax, converted)
+
+    def test_entities_preserve_literal_ampersands_and_html_like_text(self):
+        literal = "<tag> &copy; & ordinary [text]"
+        self.assertEqual(html.unescape(escape_text(literal)), literal)
+        self.assertEqual(
+            html.unescape(convert_github_markdown("&amp;copy; &amp; ordinary")), "&copy; & ordinary"
+        )
+
+    def test_parentheses_and_explicit_backslashes_in_code_stay_unchanged(self):
+        for code in ("Astrochat should be able to synchronize this message : )", r"print(x) \)"):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    convert_github_markdown(f"```kotlin\n{code}\n```"), f"```kotlin\n{code}\n```"
+                )
+                self.assertEqual(convert_github_markdown(f"`{code}`"), f"`{code}`")
+
     def test_common_formatting_and_nested_lists(self):
         source = (
             "# 标题\n\n**bold**, *emphasis*, ~~removed~~.\n\n"
@@ -43,7 +84,9 @@ class ConversionTests(unittest.TestCase):
         for source in ("$$\nx^2+y^2=z^2\n$$", "$$x^2+y^2=z^2$$", "```math\nx^2+y^2=z^2\n```"):
             with self.subTest(source=source):
                 self.assertEqual(convert_github_markdown(source), "```math\nx^2+y^2=z^2\n```")
-        self.assertIn(r"\$5", convert_github_markdown(r"Cost \$5 and \$10."))
+        self.assertEqual(
+            html.unescape(convert_github_markdown(r"Cost \$5 and \$10.")), "Cost $5 and $10."
+        )
 
     def test_code_is_not_converted_or_neutralized(self):
         code = "@**all**\n- [x] example\n> [!NOTE]\n$x$\n<details>\n<!-- keep -->\n"
@@ -141,7 +184,8 @@ class ConversionTests(unittest.TestCase):
 
     def test_footnotes_preserve_references_and_explanations(self):
         converted = convert_github_markdown("text[^a]\n\n[^a]: **explanation**")
-        self.assertIn(r"text\[1\]", converted)
+        self.assertIn("text[1]", html.unescape(converted))
+        self.assertNotIn("\\", converted)
         self.assertIn("**Footnotes**", converted)
         self.assertIn("**[1]** **explanation**", converted)
 

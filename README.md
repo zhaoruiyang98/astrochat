@@ -469,6 +469,7 @@ uv run python -m astrochat --zulip-config zuliprc --once
 | 其他 HTML、与代码混在同一 HTML 块中的复杂内容 | 显示原始源码；不模拟 HTML 布局或交互 |
 
 正文中的 Zulip 提及语法会被中和，避免同步内容触发点名通知；代码中的文本保持原样。
+普通括号、花括号和反斜杠不额外转义；需要显示为字面的 Markdown 符号使用字符实体，避免 Zulip 显示多余的反斜杠。
 GitHub 用户名、Issue 编号简写不会自动映射为 Zulip 用户或 GitHub 链接。
 相对地址转换不推断仓库的默认分支，因此仓库文件链接建议在 GitHub 原文中使用完整 URL。
 

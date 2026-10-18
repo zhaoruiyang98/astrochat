@@ -523,6 +523,24 @@ class SyncTests(unittest.TestCase):
         self.assertIn("print(2)", self.client.messages[2]["content"])
         self.assertEqual(self.client.messages[999]["content"], "local reply")
 
+    def test_corrected_punctuation_updates_old_mirror_without_replacing_message(self):
+        source = "Astrochat should be able to synchronize this message : )"
+        entry = replace(self.body, body=source)
+        self.github.discussions.return_value = [entry]
+        old_content = render(self.task, entry).replace(source, source.replace(")", r"\)"))
+        with patch("astrochat.project_sync.render", return_value=old_content):
+            self.assertEqual(self.service.run_once().sent, 1)
+        self.client.messages[999] = {
+            "content": "local reply",
+            "topic": self.client.messages[1]["topic"],
+        }
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.updated, result.deleted), (0, 1, 0))
+        self.assertIn(source, self.client.messages[1]["content"])
+        self.assertNotIn(r"\)", self.client.messages[1]["content"])
+        self.assertEqual(self.client.messages[999]["content"], "local reply")
+        self.assertEqual(self.service.run_once().updated, 0)
+
     def test_images_update_existing_mirror_reuse_upload_on_restart_and_keep_local_replies(self):
         self.service.run_once()
         self.client.messages[999] = {
