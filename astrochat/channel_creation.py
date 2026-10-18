@@ -43,7 +43,7 @@ def create_public_channel(client: zulip.Client, channel: str, user_id: int, bot_
                 "subscribers": [user_id, bot_id],
                 "invite_only": False,
                 "is_web_public": False,
-                "announce": False,
+                "announce": True,
                 "can_administer_channel_group": {
                     "direct_members": [user_id, bot_id],
                     "direct_subgroups": [],

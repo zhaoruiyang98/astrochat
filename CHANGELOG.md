@@ -3,6 +3,14 @@
 记录各版本的功能新增、行为变更和问题修复，按版本从新到旧排列。尚未发布的变动记录在“未发布”中。
 当前功能与使用说明见 [README.md](README.md)。
 
+## 0.3.1
+
+### 修复
+
+- `project setup` / `project channel` 经用户确认创建公有频道时，默认启用新频道公告（`announce=true`）。
+  公告由 Zulip 的 Notification Bot 按组织设置发送至公告频道的 `new channels` Topic（名称随组织语言翻译）；
+  组织关闭新频道公告时不会发送。创建确认提示同步说明公告行为。
+
 ## 0.3.0
 
 ### 新增

@@ -179,6 +179,8 @@ project cancel a1b2c3d4
 
 选择一条发送，确认码以 bot 实际回复的内容为准。确认后创建**公有频道**，把你和 bot 加入频道并设为频道管理员，
 然后保存同步配置、返回 GitHub 授权链接。频道中的同步内容对组织内有公有频道访问权限的成员可见，不开放匿名网页访问。
+创建时默认发布新频道公告，由 Zulip 的 Notification Bot 发送到组织设置的公告频道（例如 Town Squares）的 `new channels` Topic；
+Topic 名称会随组织语言翻译。若组织关闭了新频道公告，则不会发送。更改目标频道时确认创建新频道，也采用相同行为。
 如果希望使用私有频道，请先自行创建私有频道并加入 bot，再执行 `project setup`。
 
 确认有效期为 10 分钟，只能由发起请求的用户使用一次。取消、超时或 bot 重启都不会保存这次配置；
@@ -367,8 +369,10 @@ GitHub 授权验证 token 能否读取目标 Project，不要求用户具有 Git
 更改频道的确认还绑定原配置 ID 和版本；确认前及保存前检查，避免旧请求覆盖已修改或删除重建的配置。
 后台轮询不会创建频道。已存在的频道仍需用户和 bot 预先加入，bot 不自动改变其成员或可见性。
 
-创建时使用 `POST /channels/create`，显式设置 `invite_only=false`、`is_web_public=false`，
-将用户和 bot 同时设为初始成员及频道管理员。确认期间出现同名频道时要求重新执行原命令；
+创建时使用 `POST /channels/create`，显式设置 `invite_only=false`、`is_web_public=false`、`announce=true`，
+将用户和 bot 同时设为初始成员及频道管理员。公告由 Zulip 按组织的
+[新频道公告设置](https://zulip.com/help/configure-automated-notices#new-channel-announcements)发送。
+确认期间出现同名频道时要求重新执行原命令；
 不使用会同时处理已有频道订阅的旧接口作为回退。创建失败不会更改原配置；请求超时会提示先到 Zulip 检查结果。
 如果频道创建成功，但随后的成员检查或配置保存失败，会保留频道并明确提示，用户可修正后重新执行原命令。
 

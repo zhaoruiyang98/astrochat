@@ -72,6 +72,7 @@ class ChannelCreationTests(ProjectFixture):
         self.assertEqual(options["subscribers"], [10, 1])
         self.assertFalse(options["invite_only"])
         self.assertFalse(options["is_web_public"])
+        self.assertTrue(options["announce"])
         self.assertEqual(options["can_administer_channel_group"]["direct_members"], [10, 1])
         self.worker.changed.assert_called_once_with(project.id)
 
@@ -90,6 +91,7 @@ class ChannelCreationTests(ProjectFixture):
         self.assertEqual(self.worker.mock_calls, [])
 
         self.assertIn("Settings updated", self.commands.execute(10, f"project confirm {code}"))
+        self.assertTrue(self.client.call_endpoint.call_args_list[0].kwargs["request"]["announce"])
         updated = self.store.get_owned(10, "research")
         self.assertEqual((updated.channel, updated.channel_id), ("New Channel", 31))
         self.assertEqual(updated.id, original.id)
