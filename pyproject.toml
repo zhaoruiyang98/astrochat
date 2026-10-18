@@ -5,6 +5,11 @@ description = "a simple chatbot for Zulip"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "cryptography>=44",
+    "flask>=3.1",
+    "mistune>=3.3.4,<4",
+    "requests>=2.31.0",
+    "waitress>=3.0",
     "zulip>=0.9.1",
     "zulip-bots>=0.9.1",
     "zulip-botserver>=0.9.1",

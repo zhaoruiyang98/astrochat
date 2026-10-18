@@ -1,0 +1,13 @@
+:root { font-family: system-ui, sans-serif; color: #192b36; background: #f2f5f6; }
+body { margin: 0; padding: 8vh 20px; }
+main { max-width: 560px; margin: auto; padding: 32px; background: white; border: 1px solid #dce4e8; border-radius: 16px; }
+h1 { font-size: 28px; margin: 12px 0 20px; }
+p { line-height: 1.7; overflow-wrap: anywhere; }
+.brand { color: #24665f; font-size: 14px; font-weight: 600; }
+label { display: block; margin: 24px 0 8px; font-weight: 600; }
+input { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid #71818b; border-radius: 6px; font-size: 16px; }
+button { background: #185d54; color: white; padding: 12px 20px; border: 0; border-radius: 6px; font-size: 16px; cursor: pointer; }
+:focus-visible { outline: 3px solid #438ac5; outline-offset: 3px; }
+.note, #scope { font-size: 14px; color: #536570; }
+#result { font-weight: 600; }
+code { background: #edf2f4; padding: 2px 5px; border-radius: 4px; }

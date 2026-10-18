@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>授权 Project · AstroChat</title>
+  <link rel="stylesheet" href="/static/authorize.css">
+  <script src="/static/authorize.js" defer></script>
+</head>
+<body>
+  <main>
+    <p class="brand">AstroChat / GitHub Projects</p>
+    <h1>连接你的 Project</h1>
+    <p>GitHub token 只通过本页面提交，不会发送到 Zulip 聊天记录中。</p>
+    <p id="details">正在检查授权链接…</p>
+    <form id="authorization" hidden>
+      <label for="token">GitHub personal access token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false"
+             required minlength="10" maxlength="512" aria-describedby="scope">
+      <p id="scope">Token 需要读取此 Project 及其 Issue / PR 的权限。
+        Classic PAT 需要 read:project，读取私有仓库还需要 repo。AstroChat 只读取 GitHub 内容。</p>
+      <button type="submit">验证并保存授权</button>
+    </form>
+    <p id="result" role="status" aria-live="polite"></p>
+    <p class="note">链接有效期为 10 分钟，只接受一次提交。请勿转发。
+      如需新链接，请私信 bot：<code>project auth NAME</code>。</p>
+  </main>
+</body>
+</html>
