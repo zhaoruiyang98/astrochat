@@ -18,6 +18,7 @@
 - GitHub 任务标题变化时同步修改 Topic 名称，原有消息和 Zulip 本地回复一起保留。
 - 在对应 Topic 发送 Project 状态变化、分配与取消分配负责人的通知，保留操作者和原始时间。
 - Project 状态变为 `Done` 时自动将 Topic 标记为已解决；改回其他状态时取消已解决标记。
+- 在任务首条消息中显示 Project 的优先级、开始日期和目标日期，随轮询更新。
 - 在消息正文中保留作者、原始时间和 GitHub 链接；消息实际由 bot 发送。
 - 转换 GitHub Markdown，包括只读任务清单、提示块和数学公式；简单折叠区展开显示。
 - 将 GitHub 附件中的截图下载并上传到 Zulip，让读者直接查看私有仓库 Issue 中的图片；同一配置和频道复用已上传图片。
@@ -29,7 +30,21 @@
 
 ### 任务状态与负责人
 
-每个任务的首条镜像消息会显示当前 Project 状态和负责人。Issue / PR 的历史状态与分配事件会一起导入，
+每个任务的首条镜像消息会显示当前 Project 状态和负责人。
+如果 Project 有 `Priority`（单选）、`Start date` 或 `Target date`（日期）字段，也会显示在这条消息中：
+
+```text
+Priority: High
+Start date: 2026-10-18
+Target date: (unset)
+```
+
+字段名按上述名称匹配；不存在的字段不显示，存在但未填写的字段显示 `(unset)`。
+日期保持 `YYYY-MM-DD` 格式，不做时区转换。每轮同步会检查最新值：修改、清空字段值，或删除字段后，
+都会更新原消息中的对应信息，保留消息 ID 和本地回复。这三个字段的变化不额外发送通知；
+更新速度由该配置的同步周期决定，也可以用 `project sync NAME` 立即请求同步。
+
+Issue / PR 的历史状态与分配事件会一起导入，
 后续每轮同步补充新的事件，例如 **Backlog** → **In progress**、**In progress** → **Done**、`Assigned to alice`。
 状态变化通知会加粗前后状态名称，让变化更醒目。
 自动化产生的变化也会记录，例如由 `github-project-automation` 移动到 `Done`。
@@ -413,6 +428,9 @@ uv run python -m astrochat --zulip-config zuliprc --once
   `AssignedEvent`、`UnassignedEvent`，状态事件只保留当前 Project 的记录，避免混入同一 Issue 在其他 Project 的变化。
   事件与评论按 GitHub 时间排序后导入，升级后补导入的历史事件会出现在已有 Zulip 消息之后，正文保留原时间。
   已保存的事件通知作为历史记录保留，不随评论删除；重复轮询和重启通过事件 ID 去重。
+- 每轮按 Project 分页读取字段定义，并在任务列表查询中同时获取 `Priority`、`Start date`、`Target date`，
+  不为每个任务单独请求这三个字段。字段摘要仅加入任务正文消息并参与内容哈希；值无变化时不重复编辑。
+  字段或任务列表读取不完整时停止该 Project 本轮同步，避免把读取失败误判为字段被清空。
 - Topic 名采用“标题 · hash”格式，hash 由 Project ID 和任务 ID 计算生成，取前 10 位。
   `Status=Done` 时加上 Zulip 的 `✔ ` 前缀，其他值不加；包括前缀在内最长 60 字符，超长时截短标题并保留完整后缀。
   每次同步比较生成的名称与 SQLite 中记录的 Topic，

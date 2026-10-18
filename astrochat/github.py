@@ -21,10 +21,24 @@ ASSIGNEE_FIELDS = """
         pageInfo { hasNextPage endCursor }
     }
 """
+SUMMARY_FIELDS = (
+    ("Priority", "priority", "name"),
+    ("Start date", "start_date", "date"),
+    ("Target date", "target_date", "date"),
+)
 ITEM_FIELDS = """
     id
     status: fieldValueByName(name: "Status") {
         ... on ProjectV2ItemFieldSingleSelectValue { name }
+    }
+    priority: fieldValueByName(name: "Priority") {
+        ... on ProjectV2ItemFieldSingleSelectValue { name }
+    }
+    start_date: fieldValueByName(name: "Start date") {
+        ... on ProjectV2ItemFieldDateValue { date }
+    }
+    target_date: fieldValueByName(name: "Target date") {
+        ... on ProjectV2ItemFieldDateValue { date }
     }
     content {
         __typename
@@ -70,6 +84,7 @@ class Task:
     project_id: str | None = None
     status: str | None = None
     assignees: tuple[str, ...] = ()
+    project_fields: tuple[tuple[str, str | None], ...] = ()
 
 
 def discussion(node: dict[str, Any], kind: str) -> Discussion:
@@ -190,6 +205,12 @@ class GitHubClient:
             seen_cursors.add(cursor)
 
     def tasks(self, project: dict[str, Any]) -> tuple[list[Task], int]:
+        # Values alone cannot distinguish an absent field from an unset value.
+        # Read definitions once per project, not separately for every task.
+        fields = self.connection(
+            project["id"], "ProjectV2", "fields", "... on ProjectV2FieldCommon { name }"
+        )
+        field_names = {field["name"] for field in fields}
         items = self.connection(project["id"], "ProjectV2", "items", ITEM_FIELDS)
         tasks = []
         skipped = 0
@@ -215,6 +236,11 @@ class GitHubClient:
                     project["id"],
                     (item["status"] or {}).get("name"),
                     self.assignees(content),
+                    project_fields=tuple(
+                        (name, (item[alias] or {}).get(value_key))
+                        for name, alias, value_key in SUMMARY_FIELDS
+                        if name in field_names
+                    ),
                 )
             )
         return tasks, skipped

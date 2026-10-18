@@ -43,6 +43,8 @@ def render(task: Task, entry: Discussion, image_urls: dict[str, str] | None = No
         heading += f"\n**{escape_text(task.title)}**"
         heading += f"\nProject status: {escape_text(task.status or '(unset)')}"
         heading += f"\nAssignees: {escape_text(', '.join(task.assignees) or '(unassigned)')}"
+        for name, value in task.project_fields:
+            heading += f"\n{escape_text(name)}: {escape_text(value or '(unset)')}"
     if entry.is_event:
         body = escape_text(entry.body)
         if entry.status_change is not None:

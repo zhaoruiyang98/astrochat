@@ -21,6 +21,9 @@ def item(identifier="I_1", kind="Issue", **changes):
     return {
         "id": f"PVTI_{identifier}",
         "status": {"name": "Backlog"},
+        "priority": None,
+        "start_date": None,
+        "target_date": None,
         "content": {
             **comment(identifier),
             "__typename": kind,
@@ -86,6 +89,7 @@ class GitHubTests(unittest.TestCase):
 
     def test_tasks_and_comments_follow_all_pages(self):
         self.responses(
+            page("fields", []),
             page("items", [item()], "items-2"),
             page("items", [item("I_2"), {"id": "hidden", "content": None}]),
             page("comments", [comment("C_1")], "comments-2"),
@@ -101,7 +105,7 @@ class GitHubTests(unittest.TestCase):
         cursors = [
             call.kwargs["json"]["variables"]["cursor"] for call in self.session.post.call_args_list
         ]
-        self.assertEqual(cursors, [None, "items-2", None, "comments-2", None])
+        self.assertEqual(cursors, [None, None, "items-2", None, "comments-2", None])
         self.assertEqual((tasks[0].status, tasks[0].assignees), ("Backlog", ("alice",)))
 
     def test_partial_graphql_errors_fail_instead_of_using_partial_snapshot(self):
@@ -133,15 +137,16 @@ class GitHubTests(unittest.TestCase):
         draft = item("D_1", "DraftIssue", creator={"login": "bob"})
         del draft["content"]["author"]
         del draft["content"]["url"]
-        self.responses(page("items", [draft]))
+        self.responses(page("fields", []), page("items", [draft]))
         tasks, _ = self.github.tasks(self.project)
         entries = self.github.discussions(tasks[0])
         self.assertEqual(entries[0].author, "bob")
         self.assertEqual(entries[0].url, self.project["url"])
-        self.assertEqual(self.session.post.call_count, 1)
+        self.assertEqual(self.session.post.call_count, 2)
 
     def test_pr_includes_reviews_and_all_thread_pages_but_not_pending_drafts(self):
         self.responses(
+            page("fields", []),
             page("items", [item("PR_1", "PullRequest")]),
             page("comments", [comment("C_1", createdAt="2026-10-18T00:03:00Z")]),
             page("reviews", [comment("R_1", state="APPROVED", submittedAt=None)], "r2"),
@@ -173,6 +178,7 @@ class GitHubTests(unittest.TestCase):
 
     def test_status_history_includes_intermediate_states_automation_and_only_this_project(self):
         self.responses(
+            page("fields", []),
             page("items", [item()]),
             page("comments", [comment("C_1", createdAt="2026-10-18T00:02:00Z")]),
             page(
@@ -224,6 +230,7 @@ class GitHubTests(unittest.TestCase):
 
     def test_assignment_and_unassignment_record_actor_assignee_and_original_time(self):
         self.responses(
+            page("fields", []),
             page("items", [item()]),
             page("comments", []),
             page(
@@ -259,6 +266,7 @@ class GitHubTests(unittest.TestCase):
         )
         source["status"] = None
         self.responses(
+            page("fields", []),
             page("items", [source]),
             page("assignees", [{"login": "alice"}], "a3"),
             page("assignees", [{"login": "carol"}]),
@@ -269,10 +277,11 @@ class GitHubTests(unittest.TestCase):
         cursors = [
             call.kwargs["json"]["variables"]["cursor"] for call in self.session.post.call_args_list
         ]
-        self.assertEqual(cursors, [None, "a2", "a3"])
+        self.assertEqual(cursors, [None, None, "a2", "a3"])
 
     def test_later_event_page_failure_does_not_return_partial_discussions(self):
         self.responses(
+            page("fields", []),
             page("items", [item()]),
             page("comments", [comment("C_1")]),
             page("timelineItems", [event("E_1")], "next"),
@@ -281,3 +290,61 @@ class GitHubTests(unittest.TestCase):
         tasks, _ = self.github.tasks(self.project)
         with self.assertRaises(GitHubError):
             self.github.discussions(tasks[0])
+
+    def test_project_summary_fields_include_dates_priority_and_unset_values_for_all_task_types(
+        self,
+    ):
+        sources = []
+        for kind in ("Issue", "PullRequest", "DraftIssue"):
+            source = item(kind, kind)
+            source.update(priority={"name": "High"}, start_date={"date": "2026-10-18"})
+            sources.append(source)
+        self.responses(
+            page("fields", [{"name": "Priority"}], "fields-2"),
+            page("fields", [{"name": "Start date"}, {"name": "Target date"}]),
+            page("items", sources),
+        )
+        tasks, _ = self.github.tasks(self.project)
+        for task in tasks:
+            with self.subTest(kind=task.type):
+                self.assertEqual(
+                    task.project_fields,
+                    (
+                        ("Priority", "High"),
+                        ("Start date", "2026-10-18"),
+                        ("Target date", None),
+                    ),
+                )
+        self.assertEqual(self.session.post.call_count, 3)
+        query = self.session.post.call_args.kwargs["json"]["query"]
+        for name in ("Priority", "Start date", "Target date"):
+            self.assertIn(f'fieldValueByName(name: "{name}")', query)
+        self.assertIn("ProjectV2ItemFieldDateValue { date }", query)
+
+    def test_absent_fields_are_distinct_from_existing_but_unset_fields(self):
+        self.responses(
+            page("fields", [{"name": "Priority"}, {"name": "Start date"}, {"name": "Target date"}]),
+            page("items", [item()]),
+            page("fields", [{"name": "Priority"}]),
+            page("items", [item()]),
+            page("fields", []),
+            page("items", [item()]),
+        )
+        tasks, _ = self.github.tasks(self.project)
+        self.assertEqual(
+            tasks[0].project_fields,
+            (("Priority", None), ("Start date", None), ("Target date", None)),
+        )
+        tasks, _ = self.github.tasks(self.project)
+        self.assertEqual(tasks[0].project_fields, (("Priority", None),))
+        tasks, _ = self.github.tasks(self.project)
+        self.assertEqual(tasks[0].project_fields, ())
+
+    def test_later_field_definition_page_failure_does_not_return_partial_task_metadata(self):
+        self.responses(
+            page("fields", [{"name": "Priority"}], "next"),
+            {"data": {"node": None}},
+        )
+        with self.assertRaises(GitHubError):
+            self.github.tasks(self.project)
+        self.assertEqual(self.session.post.call_count, 2)

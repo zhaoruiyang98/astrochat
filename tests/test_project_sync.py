@@ -136,6 +136,89 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(self.client.messages), 2)
         self.assertIn("alice", self.client.messages[1]["content"])
 
+    def test_project_fields_update_only_the_first_message_and_preserve_ids_after_restart(self):
+        self.service.run_once()
+        self.client.messages[999] = {"content": "local reply", "topic": topic_name(self.task)}
+        comment = dict(self.client.messages[2])
+        snapshots = (
+            (("Priority", "High"), ("Start date", "2026-10-18"), ("Target date", None)),
+            (("Priority", "Medium"), ("Start date", "2026-10-19"), ("Target date", "2026-10-31")),
+            (("Priority", None), ("Start date", None), ("Target date", None)),
+            (),
+        )
+        for fields in snapshots:
+            with self.subTest(fields=fields):
+                self.github.tasks.return_value = ([replace(self.task, project_fields=fields)], 0)
+                result = self.service.run_once()
+                self.assertEqual(
+                    (result.sent, result.updated, result.deleted, result.renamed), (0, 1, 0, 0)
+                )
+                content = self.client.messages[1]["content"]
+                for name, value in fields:
+                    self.assertIn(f"{name}: {value or '(unset)'}", content)
+                if not fields:
+                    for name in ("Priority", "Start date", "Target date"):
+                        self.assertNotIn(f"{name}:", content)
+                self.assertEqual(set(self.client.messages), {1, 2, 999})
+                self.assertEqual(self.client.messages[2], comment)
+                self.assertEqual(self.client.messages[999]["content"], "local reply")
+                self.reload()
+                self.assertEqual(self.service.run_once().updated, 0)
+
+    def test_project_fields_are_in_the_first_part_of_a_long_description_and_are_literal(self):
+        task = replace(
+            self.task,
+            project_fields=(
+                ("Priority", "@**all** [urgent]"),
+                ("Start date", "2026-10-18"),
+                ("Target date", None),
+            ),
+        )
+        body = replace(self.body, body="long description " * 2000)
+        self.github.tasks.return_value = ([task], 0)
+        self.github.discussions.return_value = [body, self.comment]
+        self.assertGreater(self.service.run_once().sent, 2)
+        first = self.client.messages[1]["content"]
+        self.assertIn("Start date: 2026-10-18", first)
+        self.assertIn("Target date: (unset)", first)
+        self.assertNotIn("@**all**", first)
+        self.assertIn("&#91;urgent&#93;", first)
+        self.assertTrue(
+            all(len(message["content"]) <= 10000 for message in self.client.messages.values())
+        )
+
+    def test_project_field_edit_failure_preserves_checkpoint_and_retries(self):
+        self.service.run_once()
+        before = self.path.read_bytes()
+        original = self.client.messages[1]["content"]
+        self.github.tasks.return_value = (
+            [replace(self.task, project_fields=(("Priority", "High"),))],
+            0,
+        )
+        self.client.fail = "update"
+        with self.assertLogs("astrochat.project_sync", level="ERROR"):
+            self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.messages[1]["content"], original)
+        self.reload()
+        self.client.fail = None
+        self.assertEqual(self.service.run_once().updated, 1)
+        self.assertIn("Priority: High", self.client.messages[1]["content"])
+
+    def test_project_field_preview_does_not_change_messages_or_checkpoints(self):
+        self.service.run_once()
+        before = self.path.read_bytes()
+        original = {key: dict(value) for key, value in self.client.messages.items()}
+        self.github.tasks.return_value = (
+            [replace(self.task, project_fields=(("Target date", "2026-11-01"),))],
+            0,
+        )
+        self.reload(dry_run=True)
+        result = self.service.run_once()
+        self.assertEqual((result.updated, result.sent, result.deleted), (1, 0, 0))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.messages, original)
+
     def test_status_and_assignee_history_imports_once_and_preserves_local_replies(self):
         self.service.run_once()
         self.client.messages[999] = {
