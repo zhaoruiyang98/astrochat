@@ -4,7 +4,7 @@ import unittest
 from contextlib import ExitStack, closing
 from pathlib import Path
 
-from astrochat.sync_state import MessageState, open_state
+from astrochat.sync_state import MessageState, Observation, open_state
 
 
 class StateTests(unittest.TestCase):
@@ -185,11 +185,13 @@ class StateTests(unittest.TestCase):
         state.bind(self.binding)
         state.topic_for("I_1", "Original")
         state.save_message("I_1", "I_1:0", MessageState(1, "digest"))
-        state.connection.executescript("DROP TABLE images; PRAGMA user_version = 1;")
+        state.connection.executescript(
+            "DROP TABLE observations; DROP TABLE images; PRAGMA user_version = 1;"
+        )
         self.resources.close()
         before = self.path.read_bytes()
         preview = self.open(dry_run=True)
-        self.assertEqual(preview.connection.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(preview.connection.execute("PRAGMA user_version").fetchone()[0], 3)
         preview.save_image("hash", "/user_uploads/1/a.png")
         self.assertIsNone(preview.image_url("hash"))
         self.resources.close()
@@ -198,8 +200,39 @@ class StateTests(unittest.TestCase):
         upgraded.bind(self.binding)
         self.assertEqual(upgraded.topic_for("I_1", "Unused"), "Original")
         self.assertEqual(upgraded.messages_for("I_1"), {"I_1:0": MessageState(1, "digest")})
-        self.assertEqual(upgraded.connection.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(upgraded.connection.execute("PRAGMA user_version").fetchone()[0], 3)
         upgraded.save_image("hash", "/user_uploads/1/a.png")
+
+    def test_version_two_upgrade_preserves_images_messages_and_preview_database(self):
+        state = self.open()
+        state.topic_for("D_1", "Draft")
+        state.save_message("D_1", "D_1:0", MessageState(1, "digest"))
+        state.save_image("hash", "/user_uploads/1/a.png")
+        state.connection.executescript("DROP TABLE observations; PRAGMA user_version = 2;")
+        self.resources.close()
+        before = self.path.read_bytes()
+        preview = self.open(dry_run=True)
+        self.assertIsNone(preview.observation_for("D_1"))
+        preview.save_observation("D_1", Observation("Done", ("alice",), 1))
+        self.assertIsNone(preview.observation_for("D_1"))
+        self.resources.close()
+        self.assertEqual(self.path.read_bytes(), before)
+        state = self.open()
+        self.assertEqual(state.image_url("hash"), "/user_uploads/1/a.png")
+        self.assertEqual(state.messages_for("D_1"), {"D_1:0": MessageState(1, "digest")})
+        observation = Observation("In progress", ("alice", "bob"), 4)
+        state.save_observation("D_1", observation)
+        self.resources.close()
+        self.assertEqual(self.open().observation_for("D_1"), observation)
+
+    def test_observation_schema_migration_rolls_back_on_failure(self):
+        state = self.open()
+        state.connection.execute("PRAGMA user_version = 2")
+        self.resources.close()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.open()
+        with closing(sqlite3.connect(self.path)) as reader:
+            self.assertEqual(reader.execute("PRAGMA user_version").fetchone()[0], 2)
 
     def test_image_schema_migration_rolls_back_on_failure(self):
         state = self.open()

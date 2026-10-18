@@ -136,6 +136,195 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(self.client.messages), 2)
         self.assertIn("alice", self.client.messages[1]["content"])
 
+    def test_status_and_assignee_history_imports_once_and_preserves_local_replies(self):
+        self.service.run_once()
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": topic_name(self.task),
+            "content": "local reply",
+        }
+        task = replace(self.task, status="Done", assignees=("alice", "bob"))
+        events = [
+            replace(
+                self.comment,
+                id="E_1",
+                kind="Project status",
+                body="Project status: (unset) → Backlog",
+                is_event=True,
+            ),
+            replace(
+                self.comment,
+                id="E_2",
+                kind="Project status",
+                body="Project status: Backlog → In progress",
+                is_event=True,
+            ),
+            replace(
+                self.comment,
+                id="E_3",
+                kind="Project status",
+                body="Project status: In progress → Done",
+                is_event=True,
+            ),
+            replace(
+                self.comment, id="E_4", kind="Assignment", body="Assigned to bob", is_event=True
+            ),
+        ]
+        self.github.tasks.return_value = ([task], 0)
+        self.github.discussions.return_value = [self.body, self.comment, *events]
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.updated, result.renamed), (4, 1, 1))
+        self.assertIn("Project status: Done", self.client.messages[1]["content"])
+        self.assertIn("Assignees: alice, bob", self.client.messages[1]["content"])
+        self.assertTrue(
+            all(message["topic"] == topic_name(task) for message in self.client.messages.values())
+        )
+        self.assertEqual(self.client.messages[999]["content"], "local reply")
+        self.reload()
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.updated, result.renamed), (0, 0, 0))
+        self.github.discussions.return_value = [self.body]
+        self.assertEqual(self.service.run_once().deleted, 1)
+        self.assertTrue(
+            all(f"event:{event.id}:0" in self.state.messages_for(task.id) for event in events)
+        )
+
+    def test_done_resolves_and_leaving_done_unresolves_whole_topic(self):
+        self.service.run_once()
+        original = self.client.messages[1]["topic"]
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": original,
+            "content": "reply",
+        }
+        done = replace(self.task, status="Done")
+        self.github.tasks.return_value = ([done], 0)
+        self.assertEqual(self.service.run_once().renamed, 1)
+        self.assertEqual(self.client.messages[999]["topic"], "✔ " + original)
+        self.github.tasks.return_value = ([replace(done, status="In progress")], 0)
+        self.assertEqual(self.service.run_once().renamed, 1)
+        self.assertEqual(self.client.messages[999]["topic"], original)
+        self.assertEqual(set(self.client.messages), {1, 2, 999})
+
+    def test_initial_done_and_title_changes_keep_resolved_prefix_hash_and_length(self):
+        done = replace(self.task, status="Done", title="very long title " * 10)
+        self.github.tasks.return_value = ([done], 0)
+        self.assertEqual(self.service.run_once().sent, 2)
+        original = self.client.messages[1]["topic"]
+        self.assertTrue(original.startswith("✔ "))
+        self.assertLessEqual(len(original), 60)
+        changed = replace(done, title="Renamed task")
+        self.github.tasks.return_value = ([changed], 0)
+        self.assertEqual(self.service.run_once().renamed, 1)
+        self.assertTrue(self.client.messages[1]["topic"].startswith("✔ Renamed task"))
+        self.assertEqual(original.rsplit(" · ", 1)[1], topic_name(changed).rsplit(" · ", 1)[1])
+        for status in (None, "Backlog", "Not Done"):
+            self.assertFalse(topic_name(replace(done, status=status)).startswith("✔ "))
+
+    def test_failed_resolution_keeps_checkpoint_and_retries_before_sending_events(self):
+        self.service.run_once()
+        before = self.path.read_bytes()
+        done = replace(self.task, status="Done")
+        event = replace(self.comment, id="E_1", body="In progress → Done", is_event=True)
+        self.github.tasks.return_value = ([done], 0)
+        self.github.discussions.return_value = [self.body, self.comment, event]
+        self.client.fail = "rename"
+        with self.assertLogs("astrochat.project_sync", level="ERROR"):
+            self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.reload()
+        self.client.fail = None
+        result = self.service.run_once()
+        self.assertEqual((result.renamed, result.sent, result.failed), (1, 1, 0))
+
+    def test_event_retry_after_partial_import_does_not_duplicate_saved_events(self):
+        self.service.run_once()
+        events = [replace(self.comment, id=f"E_{index}", is_event=True) for index in (1, 2)]
+        self.github.discussions.return_value = [self.body, self.comment, *events]
+        original_send = self.client.send_message
+
+        def fail_second(message):
+            if len(self.client.messages) == 3:
+                return {"result": "error", "msg": "offline"}
+            return original_send(message)
+
+        with patch.object(self.client, "send_message", side_effect=fail_second):
+            with self.assertLogs("astrochat.project_sync", level="ERROR"):
+                self.assertEqual(self.service.run_once().failed, 1)
+        self.reload()
+        self.assertEqual(self.service.run_once().sent, 1)
+        self.assertEqual(len(self.client.messages), 4)
+
+    def test_activity_and_resolution_preview_leave_messages_and_disk_unchanged(self):
+        self.service.run_once()
+        before = self.path.read_bytes()
+        original = {key: dict(value) for key, value in self.client.messages.items()}
+        self.github.tasks.return_value = (
+            [replace(self.task, status="Done", assignees=("bob",))],
+            0,
+        )
+        self.github.discussions.return_value = [
+            self.body,
+            self.comment,
+            replace(self.comment, id="E_1", is_event=True),
+        ]
+        self.reload(dry_run=True)
+        result = self.service.run_once()
+        self.assertEqual((result.renamed, result.sent, result.updated), (1, 1, 1))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.messages, original)
+
+    def test_event_and_current_metadata_are_literal_and_cannot_trigger_mentions(self):
+        task = replace(self.task, status="@**all**", assignees=("alice",))
+        event = replace(
+            self.comment,
+            body="Assigned to @**all** ![image](https://github.com/user-attachments/assets/x)",
+            is_event=True,
+        )
+        for entry in (self.body, event):
+            content = render(task, entry)
+            self.assertNotIn("@**all**", content)
+            self.assertNotIn("![image]", content)
+
+    def test_draft_polling_tracks_changes_after_baseline_and_keeps_history_on_restart(self):
+        draft = replace(self.task, type="DraftIssue", status="Backlog", assignees=("alice",))
+        self.github.tasks.return_value = ([draft], 0)
+        self.github.discussions.return_value = [self.body]
+        self.assertEqual(self.service.run_once().sent, 1)
+        self.reload()
+        changed = replace(draft, status="In progress", assignees=("bob",))
+        self.github.tasks.return_value = ([changed], 0)
+        self.assertEqual(self.service.run_once().sent, 1)
+        content = self.client.messages[2]["content"]
+        self.assertIn("Backlog → In progress", content)
+        self.assertIn("Assignees: alice → bob", content)
+        self.assertIn("polling time; actor unavailable", content)
+        self.github.tasks.return_value = ([replace(changed, status="Done", assignees=())], 0)
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.renamed), (1, 1))
+        self.assertIn("Assignees: bob → (unassigned)", self.client.messages[3]["content"])
+        self.reload()
+        self.assertEqual(self.service.run_once().sent, 0)
+        self.assertEqual(len(self.client.messages), 3)
+        self.assertEqual(self.state.observation_for(draft.id).sequence, 2)
+
+    def test_failed_draft_notification_does_not_advance_baseline(self):
+        draft = replace(self.task, type="DraftIssue", status="Backlog")
+        self.github.tasks.return_value = ([draft], 0)
+        self.github.discussions.return_value = [self.body]
+        self.service.run_once()
+        self.github.tasks.return_value = ([replace(draft, status="Done")], 0)
+        self.client.fail = "send"
+        with self.assertLogs("astrochat.project_sync", level="ERROR"):
+            self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(self.state.observation_for(draft.id).status, "Backlog")
+        self.reload()
+        self.client.fail = None
+        self.assertEqual(self.service.run_once().sent, 1)
+        self.assertEqual(self.state.observation_for(draft.id).status, "Done")
+
     def test_new_edit_delete_preserve_ids_and_do_not_touch_local_replies(self):
         self.service.run_once()
         original_topic = self.client.messages[1]["topic"]

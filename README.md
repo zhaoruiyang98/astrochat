@@ -16,6 +16,8 @@
 - 将个人或组织的 GitHub Project 同步到指定的 Zulip Channel，每个 Issue、PR 或 DraftIssue 对应一个 Topic。
 - 首次导入任务正文和历史讨论，之后定时同步新增、编辑和删除；PR 讨论包括普通评论、已提交的 Review 和代码行讨论。
 - GitHub 任务标题变化时同步修改 Topic 名称，原有消息和 Zulip 本地回复一起保留。
+- 在对应 Topic 发送 Project 状态变化、分配与取消分配负责人的通知，保留操作者和原始时间。
+- Project 状态变为 `Done` 时自动将 Topic 标记为已解决；改回其他状态时取消已解决标记。
 - 在消息正文中保留作者、原始时间和 GitHub 链接；消息实际由 bot 发送。
 - 转换 GitHub Markdown，包括只读任务清单、提示块和数学公式；简单折叠区展开显示。
 - 将 GitHub 附件中的截图下载并上传到 Zulip，让读者直接查看私有仓库 Issue 中的图片；同一配置和频道复用已上传图片。
@@ -24,6 +26,21 @@
 - 默认查看自己的项目，添加 `--all` 可查看所有用户的项目及创建者；只有创建者能管理自己的配置。
 
 同步方向是 GitHub → Zulip。在 Zulip 中的回复不会写回 GitHub，也不会更新 GitHub Project 的状态字段。
+
+### 任务状态与负责人
+
+每个任务的首条镜像消息会显示当前 Project 状态和负责人。Issue / PR 的历史状态与分配事件会一起导入，
+后续每轮同步补充新的事件，例如 `Backlog → In progress`、`In progress → Done`、`Assigned to alice`。
+自动化产生的变化也会记录，例如由 `github-project-automation` 移动到 `Done`。
+这些通知发送到该任务的 Topic，不会自动提及同名 Zulip 用户；收到提醒的方式由你的频道和 Topic 通知设置决定。
+
+当前读取 Project 中名为 `Status` 的字段。当其值为 `Done`（忽略大小写及首尾空格）时，
+Topic 会变为 `✔ 标题 · hash`，即 Zulip 的已解决状态；离开 `Done` 时会移除该标记。
+关闭 Issue 本身不会直接标记 Topic，是否已解决以 Project 的 `Status` 为准。
+改名会保留原有消息及本地回复，bot 需要有修改该 Topic 的权限。
+
+Issue / PR 通过 GitHub 事件历史补齐轮询期间的中间变化。DraftIssue 没有此历史接口：首次同步记录当前值，
+以后比较轮询结果并通知变化；草稿通知注明观察时间，不推断操作者，不能还原两次轮询之间的中间状态。
 
 ### 图片与附件
 
@@ -355,14 +372,15 @@ SQLite 数据库自动创建，无需运行额外数据库服务。默认目录�
 .astrochat/
   projects.sqlite3       # 用户配置、加密 token、授权链接摘要、调度状态
   token.key              # token 加密密钥，文件权限为 0600
-  states/*.sqlite3       # 各配置与目标 Channel 的 Topic、消息映射、哈希和图片映射
+  states/*.sqlite3       # Topic、消息/事件映射、哈希、图片映射和草稿观察记录
 ```
 
 配置库由聊天、授权和调度线程共享，通过锁保护访问，并使用短事务；网络请求不在数据库事务内执行。
 消息检查点按配置与 Channel 分开保存，按任务查询映射，每次成功修改一条 Zulip 消息后提交对应记录，
 不需要整体重写状态文件。重启后继续使用已保存的配置、token、调度状态和消息映射。
 图片上传成功后立即提交原地址 SHA-256 → Zulip 附件地址的映射；随后消息发送失败也能复用已上传的图片。
-同步数据库使用 schema 2，首次打开 schema 1 数据库时自动添加图片表，保留原 Topic 和消息记录。
+同步数据库使用 schema 3，自动升级 schema 1 / 2：补齐图片表和草稿观察记录表，保留原 Topic、消息和图片映射。
+Issue / PR 事件使用 GitHub 事件 ID 保存映射；草稿变化使用持久化序号，通知成功保存后才推进观察记录。
 预览模式仅升级内存副本，不更改磁盘上的旧数据库。
 
 每个数据目录只允许一个进程使用，并绑定 Zulip 站点和 bot 身份；同步检查点另外绑定 GitHub Project 和目标 Channel。
@@ -390,14 +408,20 @@ uv run python -m astrochat --zulip-config zuliprc --once
 ### 同步规则与实现边界
 
 - 首次导入任务正文及全部历史讨论。PR 包括普通评论、已提交的 Review、代码行讨论和线程回复，不发布尚未提交的 Review 草稿。
+- 读取任务的 `Status` 和完整负责人列表；Issue / PR 分页读取 `ProjectV2ItemStatusChangedEvent`、
+  `AssignedEvent`、`UnassignedEvent`，状态事件只保留当前 Project 的记录，避免混入同一 Issue 在其他 Project 的变化。
+  事件与评论按 GitHub 时间排序后导入，升级后补导入的历史事件会出现在已有 Zulip 消息之后，正文保留原时间。
+  已保存的事件通知作为历史记录保留，不随评论删除；重复轮询和重启通过事件 ID 去重。
 - Topic 名采用“标题 · hash”格式，hash 由 Project ID 和任务 ID 计算生成，取前 10 位。
-  名称最长 60 字符，超长时截短标题并保留完整后缀。每次同步比较生成的名称与 SQLite 中记录的 Topic，
+  `Status=Done` 时加上 Zulip 的 `✔ ` 前缀，其他值不加；包括前缀在内最长 60 字符，超长时截短标题并保留完整后缀。
+  每次同步比较生成的名称与 SQLite 中记录的 Topic，
   不同时使用 Zulip `update_message` 的 `propagate_mode=change_all` 给整个 Topic 改名，包括 bot 有权移动的本地回复。
   消息 ID 和用户回复正文保持不变，后续评论进入新名称下；已有旧命名格式的 Topic 也会在后续同步时对齐。
 - 只有 Zulip 确认改名后才更新 SQLite 中的 Topic，再继续同步消息正文和评论。
   改名失败保留旧检查点并停止该任务本轮写入，避免把讨论拆到两个 Topic；其他任务继续同步。
   若改名成功但响应或本地提交失败，下次通过已记录的消息 ID 核对远端名称；名称已符合预期时补存检查点。
-  状态中的 `renamed` 是本轮完成名称对齐的 Topic 数，预览模式只统计计划改名，不修改 Zulip 或检查点。
+  状态中的 `renamed` 是本轮完成名称对齐的 Topic 数，包括标记或取消已解决；事件通知计入 `sent`。
+  预览模式只统计计划操作，不修改 Zulip 或检查点。
 - 改名前检查目标 Topic 是否已存在，发现同名讨论时停止该任务以避免合并；仅大小写变化允许改名。
   用于定位 Topic 的镜像消息被人工移到其他 Channel / Topic 或被删除时，会报错，需维护者检查日志并处理后再重试。
 - 消息正文保留作者、原始时间和 GitHub 链接；Zulip 中的实际发送者和消息时间仍然是 bot 和导入时间。
@@ -413,10 +437,11 @@ uv run python -m astrochat --zulip-config zuliprc --once
   重试可能出现重复消息。丢失数据库也会重新导入，无法保证这些故障场景下每条消息只发送一次。
 - API 限流或网络故障在后续轮询重试。当前使用一个同步线程，Project 依次执行，大量历史导入会延迟其他 Project。
   每轮完整读取当前讨论，适合小到中型 Project。
-- DraftIssue 只有正文，没有评论线程；转换为 Issue 后 GitHub 内容 ID 改变，会作为新任务导入。
+- DraftIssue 没有评论或事件时间线，通过 SQLite 中的状态和负责人快照记录首次同步后观察到的变化；
+  转换为 Issue 后 GitHub 内容 ID 改变，会作为新任务导入。
 - Markdown 经过独立模块转换后再计算内容哈希，具体支持范围与拆分规则见下一节。
   GitHub 附件图片先转存到 Zulip，其他图片与非图片附件保留原链接。
-- 当前不支持 Zulip → GitHub 回写、状态字段更新、Webhook、Reaction 或非图片附件转存。
+- 当前不支持 Zulip → GitHub 回写（包括修改 GitHub 状态字段）、Webhook、Reaction 或非图片附件转存。
 
 ### 图片下载、上传与复用
 
@@ -495,9 +520,12 @@ uv run ruff format --check astrochat tests
 授权过期与重放、token 加密、Channel 权限、公有频道创建确认及取消、确认过期和配置变更、
 分页与 PR 讨论、消息增删改、Topic 整体改名与本地回复保留、改名失败恢复、重启与失败恢复、SQLite 事务回滚、
 状态锁、后台线程、预览模式、聊天路由、Markdown 转换、长代码块分段和转换后的增量更新，
-以及图片授权、重定向限制、上传复用、失败重试和 schema 升级；不会连接真实 GitHub / Zulip，也不需要凭据。
+以及图片授权、重定向限制、上传复用、失败重试和 schema 升级；
+状态与分配事件分页、跨 Project 隔离、已解决标记、草稿快照及事件去重也有覆盖。
+测试不会连接真实 GitHub / Zulip，也不需要凭据。
 
 GitHub 读取接口参照 [Projects schema](https://docs.github.com/en/graphql/reference/projects)
+、[Issues schema](https://docs.github.com/en/graphql/reference/issues)
 和 [Pull requests schema](https://docs.github.com/en/graphql/reference/pulls)；Channel 成员检查使用
 [Zulip channel subscribers](https://zulip.com/api/get-subscribers)，消息同步使用
 [发送消息](https://zulip.com/api/send-message)、[编辑消息](https://zulip.com/api/update-message)和

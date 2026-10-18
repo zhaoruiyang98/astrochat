@@ -1,6 +1,7 @@
 """SQLite checkpoints, with an exclusive process lock for each sync database."""
 
 import fcntl
+import json
 import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -14,6 +15,16 @@ IMAGE_SCHEMA = """
         zulip_url TEXT NOT NULL
     );
     PRAGMA user_version = 2;
+"""
+
+OBSERVATION_SCHEMA = """
+    CREATE TABLE observations (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+        status TEXT,
+        assignees TEXT NOT NULL,
+        sequence INTEGER NOT NULL
+    );
+    PRAGMA user_version = 3;
 """
 
 
@@ -40,6 +51,7 @@ SCHEMA = (
     );
 """
     + IMAGE_SCHEMA
+    + OBSERVATION_SCHEMA
 )
 
 
@@ -47,6 +59,13 @@ SCHEMA = (
 class MessageState:
     id: int | None
     digest: str
+
+
+@dataclass(frozen=True)
+class Observation:
+    status: str | None
+    assignees: tuple[str, ...]
+    sequence: int
 
 
 class SyncState:
@@ -63,8 +82,11 @@ class SyncState:
         elif version == 1:
             # Upgrade existing checkpoints without changing topic/message mappings.
             with connection:
-                connection.executescript("BEGIN;" + IMAGE_SCHEMA)
-        elif version != 2:
+                connection.executescript("BEGIN;" + IMAGE_SCHEMA + OBSERVATION_SCHEMA)
+        elif version == 2:
+            with connection:
+                connection.executescript("BEGIN;" + OBSERVATION_SCHEMA)
+        elif version != 3:
             raise ValueError(f"Unsupported sync state version: {version}")
 
     def bind(self, binding: dict[str, Any]) -> None:
@@ -142,6 +164,31 @@ class SyncState:
             self.connection.execute(
                 "INSERT INTO images (source_hash, zulip_url) VALUES (?, ?)",
                 (source_hash, zulip_url),
+            )
+
+    def observation_for(self, task_id: str) -> Observation | None:
+        row = self.connection.execute(
+            "SELECT status, assignees, sequence FROM observations WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return Observation(row[0], tuple(json.loads(row[1])), row[2]) if row else None
+
+    def save_observation(self, task_id: str, observation: Observation) -> None:
+        """Advance a draft's baseline only after its change notification was saved."""
+        if self.dry_run:
+            return
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO observations (task_id, status, assignees, sequence)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (task_id) DO UPDATE SET
+                       status = excluded.status, assignees = excluded.assignees,
+                       sequence = excluded.sequence""",
+                (
+                    task_id,
+                    observation.status,
+                    json.dumps(observation.assignees),
+                    observation.sequence,
+                ),
             )
 
 
