@@ -17,6 +17,9 @@ from astrochat.sync_state import MessageState, Observation, SyncState
 
 logger = logging.getLogger(__name__)
 
+# Keep room for the resolved prefix, separator and at least one title character.
+MAX_TOPIC_HASH_LENGTH = 54
+
 
 class ZulipError(RuntimeError):
     pass
@@ -28,10 +31,10 @@ def checked(response: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def topic_name(task: Task, project_id: str | None = None) -> str:
-    # The suffix stays stable across title edits and distinguishes tasks/projects.
+def topic_name(task: Task, project_id: str | None = None, hash_length: int = 3) -> str:
+    # The short suffix stays stable across title edits; it is not a unique ID.
     identity = f"{project_id}:{task.id}" if project_id is not None else task.id
-    suffix = " · " + hashlib.sha256(identity.encode()).hexdigest()[:10]
+    suffix = " · " + hashlib.sha256(identity.encode()).hexdigest()[:hash_length]
     prefix = "✔ " if (task.status or "").strip().casefold() == "done" else ""
     title = " ".join(task.title.split()).removeprefix("✔ ")
     return prefix + title[: 60 - len(prefix) - len(suffix)].rstrip() + suffix
@@ -106,13 +109,15 @@ class ProjectSync:
         )
         tasks, skipped = self.github.tasks(project)
         result = SyncResult(skipped=skipped)
+        # Also reserve names during previews, when earlier tasks have no remote messages.
+        reserved_topics: set[str] = set()
         for task in tasks:
             if stop is not None and stop.is_set():
                 break
             try:
                 # Fetch all comment/review/thread pages before any changes to this task.
                 entries = self.github.discussions(task)
-                self.sync_task(task, entries, channel_id, result, stop)
+                self.sync_task(task, entries, channel_id, result, reserved_topics, stop)
                 if stop is not None and stop.is_set():
                     break
                 result.tasks += 1
@@ -131,6 +136,7 @@ class ProjectSync:
         entries: list[Discussion],
         channel_id: int,
         result: SyncResult,
+        reserved_topics: set[str],
         stop: Event | None = None,
     ) -> None:
         if stop is not None and stop.is_set():
@@ -143,7 +149,7 @@ class ProjectSync:
         if stop is not None and stop.is_set():
             return
         messages = self.state.messages_for(task.id)
-        topic = self.sync_topic(task, messages, channel_id, result)
+        topic = self.sync_topic(task, messages, channel_id, result, reserved_topics)
         current_keys = set()
         for entry in entries:
             for part, content in enumerate(split_message(render(task, entry, image_urls))):
@@ -208,62 +214,106 @@ class ProjectSync:
         self.state.save_observation(task.id, Observation(task.status, assignees, sequence))
 
     def sync_topic(
-        self, task: Task, messages: dict[str, MessageState], channel_id: int, result: SyncResult
+        self,
+        task: Task,
+        messages: dict[str, MessageState],
+        channel_id: int,
+        result: SyncResult,
+        reserved_topics: set[str],
     ) -> str:
-        desired = topic_name(task, self.config.project_id)
+        hash_length = self.state.topic_hash_length(task.id)
+        desired = topic_name(task, self.config.project_id, hash_length)
         previous = self.state.topic_for(task.id, desired)
-        if previous == desired:
+        if messages and previous == desired:
+            reserved_topics.add(previous.casefold())
             return previous
         if messages:
-            if not self.state.dry_run:
-                anchor_id = min(message.id for message in messages.values())
-                self.rename_topic(anchor_id, channel_id, previous, desired)
-            result.renamed += 1
-        # With no saved messages, there is no existing discussion to move. This
-        # also handles a changed title after the very first send failed.
-        self.state.save_topic(task.id, desired)
+            anchor_id = min(message.id for message in messages.values())
+            desired, hash_length = self.rename_topic(
+                task, anchor_id, channel_id, previous, hash_length, reserved_topics
+            )
+            if previous != desired:
+                result.renamed += 1
+        else:
+            desired, hash_length = self.select_topic(task, channel_id, hash_length, reserved_topics)
+        self.state.save_topic(task.id, desired, hash_length)
+        reserved_topics.add(desired.casefold())
         return desired
 
-    def rename_topic(self, anchor_id: int, channel_id: int, previous: str, desired: str) -> None:
+    def rename_topic(
+        self,
+        task: Task,
+        anchor_id: int,
+        channel_id: int,
+        previous: str,
+        hash_length: int,
+        reserved_topics: set[str],
+    ) -> tuple[str, int]:
         anchor = checked(self.client.call_endpoint(f"messages/{anchor_id}", method="GET"))[
             "message"
         ]
         if anchor["type"] != "stream" or anchor["stream_id"] != channel_id:
             raise ZulipError("Mirrored message moved to another channel; cannot rename its topic.")
-        if anchor["subject"] == desired:
-            # The previous request may have succeeded before its response or
-            # SQLite checkpoint was lost. Reconcile without another edit.
-            return
-        if anchor["subject"] != previous:
+        actual_topic = anchor["subject"]
+        if actual_topic != previous:
+            # Recover a confirmed remote name even if its length was not checkpointed.
+            actual_length = len(actual_topic.rsplit(" · ", 1)[-1])
+            if hash_length <= actual_length <= MAX_TOPIC_HASH_LENGTH and actual_topic == topic_name(
+                task, self.config.project_id, actual_length
+            ):
+                return actual_topic, actual_length
             raise ZulipError("Mirrored message moved to another topic; cannot rename its topic.")
-        if previous.casefold() != desired.casefold():
-            destination = checked(
-                self.client.get_messages(
+        desired, hash_length = self.select_topic(
+            task, channel_id, hash_length, reserved_topics, previous
+        )
+        if desired != previous and not self.state.dry_run:
+            checked(
+                self.client.update_message(
                     {
-                        "narrow": [
-                            {"operator": "stream", "operand": channel_id},
-                            {"operator": "topic", "operand": desired},
-                        ],
-                        "anchor": "newest",
-                        "num_before": 1,
-                        "num_after": 0,
-                        "apply_markdown": False,
+                        "message_id": anchor_id,
+                        "topic": desired,
+                        "propagate_mode": "change_all",
+                        "send_notification_to_old_thread": False,
+                        "send_notification_to_new_thread": False,
                     }
                 )
-            )["messages"]
-            if destination:
-                raise ZulipError("Target topic already exists; refusing to merge discussions.")
-        checked(
-            self.client.update_message(
+            )
+        return desired, hash_length
+
+    def select_topic(
+        self,
+        task: Task,
+        channel_id: int,
+        hash_length: int,
+        reserved_topics: set[str],
+        current_topic: str | None = None,
+    ) -> tuple[str, int]:
+        for length in range(hash_length, MAX_TOPIC_HASH_LENGTH + 1):
+            candidate = topic_name(task, self.config.project_id, length)
+            if current_topic is not None and candidate.casefold() == current_topic.casefold():
+                return candidate, length
+            if candidate.casefold() not in reserved_topics and not self.topic_exists(
+                channel_id, candidate
+            ):
+                return candidate, length
+        raise ZulipError("No available topic within the 60-character limit; change the task title.")
+
+    def topic_exists(self, channel_id: int, topic: str) -> bool:
+        destination = checked(
+            self.client.get_messages(
                 {
-                    "message_id": anchor_id,
-                    "topic": desired,
-                    "propagate_mode": "change_all",
-                    "send_notification_to_old_thread": False,
-                    "send_notification_to_new_thread": False,
+                    "narrow": [
+                        {"operator": "stream", "operand": channel_id},
+                        {"operator": "topic", "operand": topic},
+                    ],
+                    "anchor": "newest",
+                    "num_before": 1,
+                    "num_after": 0,
+                    "apply_markdown": False,
                 }
             )
-        )
+        )["messages"]
+        return bool(destination)
 
     def sync_message(
         self,

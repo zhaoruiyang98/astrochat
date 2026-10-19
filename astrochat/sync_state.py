@@ -27,6 +27,12 @@ OBSERVATION_SCHEMA = """
     PRAGMA user_version = 3;
 """
 
+TOPIC_HASH_SCHEMA = """
+    ALTER TABLE tasks ADD COLUMN hash_length INTEGER NOT NULL DEFAULT 3
+        CHECK (hash_length BETWEEN 3 AND 54);
+    PRAGMA user_version = 4;
+"""
+
 
 SCHEMA = (
     """
@@ -52,6 +58,7 @@ SCHEMA = (
 """
     + IMAGE_SCHEMA
     + OBSERVATION_SCHEMA
+    + TOPIC_HASH_SCHEMA
 )
 
 
@@ -82,11 +89,16 @@ class SyncState:
         elif version == 1:
             # Upgrade existing checkpoints without changing topic/message mappings.
             with connection:
-                connection.executescript("BEGIN;" + IMAGE_SCHEMA + OBSERVATION_SCHEMA)
+                connection.executescript(
+                    "BEGIN;" + IMAGE_SCHEMA + OBSERVATION_SCHEMA + TOPIC_HASH_SCHEMA
+                )
         elif version == 2:
             with connection:
-                connection.executescript("BEGIN;" + OBSERVATION_SCHEMA)
-        elif version != 3:
+                connection.executescript("BEGIN;" + OBSERVATION_SCHEMA + TOPIC_HASH_SCHEMA)
+        elif version == 3:
+            with connection:
+                connection.executescript("BEGIN;" + TOPIC_HASH_SCHEMA)
+        elif version != 4:
             raise ValueError(f"Unsupported sync state version: {version}")
 
     def bind(self, binding: dict[str, Any]) -> None:
@@ -122,12 +134,21 @@ class SyncState:
         ).fetchall()
         return {key: MessageState(message_id, digest) for key, message_id, digest in rows}
 
-    def save_topic(self, task_id: str, topic: str) -> None:
-        """Checkpoint a topic only after Zulip has confirmed the rename."""
+    def topic_hash_length(self, task_id: str) -> int:
+        row = self.connection.execute(
+            "SELECT hash_length FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return row[0] if row else 3
+
+    def save_topic(self, task_id: str, topic: str, hash_length: int = 3) -> None:
+        """Save the selected length with the topic after any remote rename succeeds."""
         if self.dry_run:
             return
         with self.connection:
-            self.connection.execute("UPDATE tasks SET topic = ? WHERE id = ?", (topic, task_id))
+            self.connection.execute(
+                "UPDATE tasks SET topic = ?, hash_length = ? WHERE id = ?",
+                (topic, hash_length, task_id),
+            )
 
     def save_message(self, task_id: str, key: str, message: MessageState) -> None:
         if self.dry_run:

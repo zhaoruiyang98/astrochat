@@ -459,6 +459,36 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.client.calls, [])
         self.assertEqual(self.client.reads, [])
 
+    def test_ten_digit_hash_is_shortened_after_restart_preserving_the_discussion(self):
+        self.config = replace(self.config, project_id="P_1")
+        self.reload()
+        task = replace(self.task, title="x" * 80, status="Done")
+        self.github.tasks.return_value = ([task], 0)
+        old_topic = "✔ " + "x" * 45 + " · f76b88434a"
+        with patch("astrochat.project_sync.topic_name", return_value=old_topic):
+            self.assertEqual(self.service.run_once().sent, 2)
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": old_topic,
+            "content": "local reply",
+        }
+        before = {key: dict(value) for key, value in self.client.messages.items()}
+        self.reload()
+        self.client.calls.clear()
+        result = self.service.run_once()
+        self.assertEqual((result.renamed, result.sent, result.updated, result.failed), (1, 0, 0, 0))
+        desired = "✔ " + "x" * 52 + " · f76"
+        self.assertEqual(self.client.calls, ["rename"])
+        self.assertEqual(set(self.client.messages), set(before))
+        for key, message in self.client.messages.items():
+            self.assertEqual(message, {**before[key], "topic": desired})
+        self.reload()
+        self.assertEqual(self.state.topic_for(task.id, "unused"), desired)
+        self.client.calls.clear()
+        self.assertEqual(self.service.run_once().renamed, 0)
+        self.assertEqual(self.client.calls, [])
+
     def test_failed_rename_leaves_checkpoint_and_discussion_unchanged_then_retries(self):
         self.service.run_once()
         before = self.path.read_bytes()
@@ -485,6 +515,12 @@ class SyncTests(unittest.TestCase):
         before = self.path.read_bytes()
         changed = replace(self.task, title="New title")
         self.github.tasks.return_value = ([changed], 0)
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": topic_name(changed),
+            "content": "other task",
+        }
         original_update = self.client.update_message
 
         def update_and_lose_response(request):
@@ -495,12 +531,15 @@ class SyncTests(unittest.TestCase):
             with self.assertLogs("astrochat.project_sync", level="ERROR"):
                 self.assertEqual(self.service.run_once().failed, 1)
         self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(self.client.messages[1]["topic"], topic_name(changed))
+        desired = topic_name(changed, hash_length=4)
+        self.assertEqual(self.client.messages[1]["topic"], desired)
+        self.assertEqual(self.state.topic_hash_length(changed.id), 3)
         self.reload()
         result = self.service.run_once()
         self.assertEqual((result.failed, result.renamed, result.updated), (0, 1, 1))
         self.assertEqual(self.client.calls.count("rename"), 1)
-        self.assertEqual(self.state.topic_for(self.task.id, "unused"), topic_name(changed))
+        self.assertEqual(self.state.topic_for(self.task.id, "unused"), desired)
+        self.assertEqual(self.state.topic_hash_length(changed.id), 4)
 
     def test_rename_checkpoint_survives_later_content_edit_failure(self):
         self.service.run_once()
@@ -522,6 +561,12 @@ class SyncTests(unittest.TestCase):
         before = self.path.read_bytes()
         changed = replace(self.task, title="New title")
         self.github.tasks.return_value = ([changed], 0)
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": topic_name(changed),
+            "content": "other task",
+        }
         with patch.object(
             self.state, "save_topic", side_effect=sqlite3.OperationalError("disk full")
         ):
@@ -532,6 +577,11 @@ class SyncTests(unittest.TestCase):
         result = self.service.run_once()
         self.assertEqual((result.failed, result.renamed, result.updated), (0, 1, 1))
         self.assertEqual(self.client.calls.count("rename"), 1)
+
+        self.assertEqual(self.state.topic_hash_length(changed.id), 4)
+        self.assertEqual(
+            self.state.topic_for(changed.id, "unused"), topic_name(changed, hash_length=4)
+        )
 
     def test_stop_after_rename_saves_topic_before_stopping_content_updates(self):
         self.service.run_once()
@@ -567,9 +617,15 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.client.messages, original)
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_existing_destination_is_not_merged_with_the_discussion(self):
+    def test_existing_destination_extends_hash_and_preserves_both_discussions(self):
         self.service.run_once()
-        before = self.path.read_bytes()
+        original_topic = self.client.messages[1]["topic"]
+        self.client.messages[998] = {
+            "type": "stream",
+            "to": 10,
+            "topic": original_topic,
+            "content": "local reply",
+        }
         changed = replace(self.task, title="New title")
         self.github.tasks.return_value = ([changed], 0)
         self.client.messages[999] = {
@@ -579,10 +635,145 @@ class SyncTests(unittest.TestCase):
             "content": "another topic",
         }
         self.client.calls.clear()
+        result = self.service.run_once()
+        self.assertEqual((result.failed, result.renamed), (0, 1))
+        desired = topic_name(changed, hash_length=4)
+        for identifier in (1, 2, 998):
+            self.assertEqual(self.client.messages[identifier]["topic"], desired)
+        self.assertEqual(self.client.messages[999]["topic"], topic_name(changed))
+        self.assertEqual(self.client.messages[999]["content"], "another topic")
+        self.assertEqual(self.state.topic_hash_length(changed.id), 4)
+
+    def test_initial_collision_extends_hash_and_keeps_length_after_restart_and_title_change(self):
+        first = replace(self.task, id="I_8", description=replace(self.body, id="I_8"))
+        second = replace(
+            self.task, id="I_55", title="RESEARCH", description=replace(self.body, id="I_55")
+        )
+        self.assertEqual(topic_name(first).casefold(), topic_name(second).casefold())
+        self.github.tasks.return_value = ([first, second], 0)
+        self.github.discussions.side_effect = lambda task: [task.description]
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.tasks, result.failed), (2, 2, 0))
+        self.assertEqual(self.client.messages[2]["topic"], topic_name(second, hash_length=4))
+        self.assertEqual(self.state.topic_hash_length(second.id), 4)
+        original = dict(self.client.messages[1])
+        self.reload()
+        self.client.calls.clear()
+        self.client.reads.clear()
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.renamed, result.failed), (0, 0, 0))
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.client.reads, [])
+        second = replace(second, title="Other research")
+        self.github.tasks.return_value = ([first, second], 0)
+        result = self.service.run_once()
+        self.assertEqual((result.renamed, result.failed), (1, 0))
+        self.assertEqual(self.client.messages[1], original)
+        self.assertEqual(self.client.messages[2]["topic"], topic_name(second, hash_length=4))
+
+    def test_initial_topic_collision_check_is_scoped_to_the_target_channel(self):
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 20,
+            "topic": topic_name(self.task),
+            "content": "other channel",
+        }
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.failed), (2, 0))
+        self.assertEqual(self.client.messages[999]["content"], "other channel")
+
+    def test_successive_collisions_and_resolution_keep_extended_hash_and_length_limit(self):
+        task = replace(self.task, title="x" * 80)
+        self.github.tasks.return_value = ([task], 0)
+        for length in (3, 4):
+            self.client.messages[900 + length] = {
+                "type": "stream",
+                "to": 10,
+                "topic": topic_name(task, hash_length=length),
+                "content": "other task",
+            }
+        self.assertEqual(self.service.run_once().failed, 0)
+        self.assertEqual(self.state.topic_hash_length(task.id), 5)
+        self.assertEqual(len(self.client.messages[1]["topic"]), 60)
+        done = replace(task, status="Done")
+        self.client.messages[905] = {
+            "type": "stream",
+            "to": 10,
+            "topic": topic_name(done, hash_length=5),
+            "content": "resolved task",
+        }
+        self.github.tasks.return_value = ([done], 0)
+        result = self.service.run_once()
+        self.assertEqual((result.failed, result.renamed), (0, 1))
+        self.assertEqual(self.client.messages[1]["topic"], topic_name(done, hash_length=6))
+        self.assertEqual(len(self.client.messages[1]["topic"]), 60)
+        for identifier in (903, 904, 905):
+            del self.client.messages[identifier]
+        self.reload()
+        self.github.tasks.return_value = ([task], 0)
+        self.assertEqual(self.service.run_once().renamed, 1)
+        self.assertEqual(self.client.messages[1]["topic"], topic_name(task, hash_length=6))
+        self.assertEqual(self.state.topic_hash_length(task.id), 6)
+
+    def test_first_send_failure_retains_selected_hash_length_after_collision_disappears(self):
+        self.client.messages[999] = {
+            "type": "stream",
+            "to": 10,
+            "topic": topic_name(self.task),
+            "content": "other task",
+        }
+        self.client.fail = "send"
         with self.assertLogs("astrochat.project_sync", level="ERROR"):
             self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(self.state.topic_hash_length(self.task.id), 4)
+        del self.client.messages[999]
+        self.reload()
+        self.client.fail = None
+        self.assertEqual(self.service.run_once().sent, 2)
+        self.assertEqual(self.client.messages[1]["topic"], topic_name(self.task, hash_length=4))
+
+    def test_collision_preview_reserves_names_without_writing_messages_or_state(self):
+        first = replace(self.task, id="I_8", description=replace(self.body, id="I_8"))
+        second = replace(self.task, id="I_55", description=replace(self.body, id="I_55"))
+        self.github.tasks.return_value = ([first, second], 0)
+        self.github.discussions.side_effect = lambda task: [task.description]
+        before = self.path.read_bytes()
+        self.reload(dry_run=True)
+        with patch.object(self.state, "save_topic", wraps=self.state.save_topic) as save:
+            result = self.service.run_once()
+        self.assertEqual((result.failed, result.sent), (0, 2))
+        self.assertEqual(
+            [call.args for call in save.call_args_list],
+            [(first.id, topic_name(first), 3), (second.id, topic_name(second, hash_length=4), 4)],
+        )
         self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.client.messages, {})
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_collision_search_stops_at_the_topic_length_limit(self):
+        task = replace(self.task, title="x" * 80, status="Done")
+        self.github.tasks.return_value = ([task], 0)
+        with patch.object(
+            self.client,
+            "get_messages",
+            return_value={"result": "success", "messages": [{"id": 999}]},
+        ) as lookup:
+            with self.assertLogs("astrochat.project_sync", level="ERROR"):
+                self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(lookup.call_count, 52)
+        self.assertEqual(len(topic_name(task, hash_length=54)), 60)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.state.messages_for(task.id), {})
+
+    def test_initial_topic_lookup_failure_does_not_send_messages(self):
+        with patch.object(
+            self.client, "get_messages", return_value={"result": "error", "msg": "lookup failed"}
+        ):
+            with self.assertLogs("astrochat.project_sync", level="ERROR"):
+                self.assertEqual(self.service.run_once().failed, 1)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.state.messages_for(self.task.id), {})
+        self.assertEqual(self.service.run_once().sent, 2)
 
     def test_manually_moved_or_deleted_anchor_does_not_rename_unrelated_discussions(self):
         self.service.run_once()
@@ -622,7 +813,8 @@ class SyncTests(unittest.TestCase):
         self.reload()
         result = self.service.run_once()
         self.assertEqual((result.failed, result.renamed, result.sent), (0, 0, 2))
-        self.assertEqual(self.client.reads, [])
+        self.assertNotIn("rename", self.client.calls)
+        self.assertTrue(all(isinstance(request, dict) for request in self.client.reads))
         self.assertEqual(
             self.client.messages[1]["topic"], topic_name(replace(self.task, title="New title"))
         )
@@ -761,7 +953,7 @@ class SyncTests(unittest.TestCase):
 
     def test_topic_names_are_bounded_and_distinguish_same_titles(self):
         task = replace(self.task, title="支持多个 Project 同步")
-        self.assertRegex(topic_name(task, "P_1"), r"^支持多个 Project 同步 · [0-9a-f]{10}$")
+        self.assertRegex(topic_name(task, "P_1"), r"^支持多个 Project 同步 · [0-9a-f]{3}$")
         long = replace(self.task, title="title\n" * 100)
         self.assertLessEqual(len(topic_name(long)), 60)
         self.assertNotIn("\n", topic_name(long))

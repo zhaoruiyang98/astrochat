@@ -59,11 +59,13 @@ class StateTests(unittest.TestCase):
         state.topic_for("I_1", "Original")
         state.topic_for("I_2", "Other task")
         state.save_message("I_1", "C_1:0", MessageState(101, "hash"))
-        state.save_topic("I_1", "Renamed")
+        state.save_topic("I_1", "Renamed", 5)
         self.resources.close()
         state = self.open()
         self.assertEqual(state.topic_for("I_1", "unused"), "Renamed")
         self.assertEqual(state.topic_for("I_2", "unused"), "Other task")
+        self.assertEqual(state.topic_hash_length("I_1"), 5)
+        self.assertEqual(state.topic_hash_length("I_2"), 3)
         self.assertEqual(state.messages_for("I_1"), {"C_1:0": MessageState(101, "hash")})
 
     def test_message_keys_are_scoped_to_tasks(self):
@@ -130,7 +132,8 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             preview.bind({**self.binding, "project": "P_2"})
         preview.topic_for("I_2", "Two")
-        preview.save_topic("I_1", "Renamed")
+        preview.save_topic("I_1", "Renamed", 5)
+        self.assertEqual(preview.topic_hash_length("I_1"), 3)
         preview.save_message("I_1", "C_1:0", MessageState(101, "new"))
         preview.delete_message("I_1", "C_1:0")
         self.resources.close()
@@ -186,12 +189,13 @@ class StateTests(unittest.TestCase):
         state.topic_for("I_1", "Original")
         state.save_message("I_1", "I_1:0", MessageState(1, "digest"))
         state.connection.executescript(
-            "DROP TABLE observations; DROP TABLE images; PRAGMA user_version = 1;"
+            "DROP TABLE observations; DROP TABLE images; "
+            "ALTER TABLE tasks DROP COLUMN hash_length; PRAGMA user_version = 1;"
         )
         self.resources.close()
         before = self.path.read_bytes()
         preview = self.open(dry_run=True)
-        self.assertEqual(preview.connection.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(preview.connection.execute("PRAGMA user_version").fetchone()[0], 4)
         preview.save_image("hash", "/user_uploads/1/a.png")
         self.assertIsNone(preview.image_url("hash"))
         self.resources.close()
@@ -200,7 +204,8 @@ class StateTests(unittest.TestCase):
         upgraded.bind(self.binding)
         self.assertEqual(upgraded.topic_for("I_1", "Unused"), "Original")
         self.assertEqual(upgraded.messages_for("I_1"), {"I_1:0": MessageState(1, "digest")})
-        self.assertEqual(upgraded.connection.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(upgraded.connection.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(upgraded.topic_hash_length("I_1"), 3)
         upgraded.save_image("hash", "/user_uploads/1/a.png")
 
     def test_version_two_upgrade_preserves_images_messages_and_preview_database(self):
@@ -208,7 +213,10 @@ class StateTests(unittest.TestCase):
         state.topic_for("D_1", "Draft")
         state.save_message("D_1", "D_1:0", MessageState(1, "digest"))
         state.save_image("hash", "/user_uploads/1/a.png")
-        state.connection.executescript("DROP TABLE observations; PRAGMA user_version = 2;")
+        state.connection.executescript(
+            "DROP TABLE observations; ALTER TABLE tasks DROP COLUMN hash_length; "
+            "PRAGMA user_version = 2;"
+        )
         self.resources.close()
         before = self.path.read_bytes()
         preview = self.open(dry_run=True)
@@ -224,6 +232,58 @@ class StateTests(unittest.TestCase):
         state.save_observation("D_1", observation)
         self.resources.close()
         self.assertEqual(self.open().observation_for("D_1"), observation)
+
+    def test_version_three_upgrade_preserves_state_and_only_migrates_preview_in_memory(self):
+        state = self.open()
+        state.bind(self.binding)
+        state.topic_for("D_1", "Draft · 0123456789")
+        state.save_message("D_1", "D_1:0", MessageState(1, "digest"))
+        state.save_image("hash", "/user_uploads/1/a.png")
+        observation = Observation("Done", ("alice",), 2)
+        state.save_observation("D_1", observation)
+        state.connection.executescript(
+            "ALTER TABLE tasks DROP COLUMN hash_length; PRAGMA user_version = 3;"
+        )
+        self.resources.close()
+        before = self.path.read_bytes()
+        preview = self.open(dry_run=True)
+        self.assertEqual(preview.topic_hash_length("D_1"), 3)
+        preview.save_topic("D_1", "Draft · 0123", 4)
+        self.resources.close()
+        self.assertEqual(self.path.read_bytes(), before)
+        state = self.open()
+        state.bind(self.binding)
+        self.assertEqual(state.connection.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(state.topic_for("D_1", "unused"), "Draft · 0123456789")
+        self.assertEqual(state.topic_hash_length("D_1"), 3)
+        self.assertEqual(state.messages_for("D_1"), {"D_1:0": MessageState(1, "digest")})
+        self.assertEqual(state.image_url("hash"), "/user_uploads/1/a.png")
+        self.assertEqual(state.observation_for("D_1"), observation)
+
+    def test_hash_length_and_topic_checkpoint_roll_back_together(self):
+        state = self.open()
+        state.topic_for("I_1", "Original")
+        state.connection.executescript("""
+            CREATE TEMP TRIGGER fail_topic AFTER UPDATE ON tasks
+            BEGIN
+                SELECT RAISE(FAIL, 'simulated storage failure');
+            END;
+        """)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "storage failure"):
+            state.save_topic("I_1", "Renamed", 4)
+        self.resources.close()
+        state = self.open()
+        self.assertEqual(state.topic_for("I_1", "unused"), "Original")
+        self.assertEqual(state.topic_hash_length("I_1"), 3)
+
+    def test_topic_hash_migration_rolls_back_on_failure(self):
+        state = self.open()
+        state.connection.execute("PRAGMA user_version = 3")
+        self.resources.close()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.open()
+        with closing(sqlite3.connect(self.path)) as reader:
+            self.assertEqual(reader.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_observation_schema_migration_rolls_back_on_failure(self):
         state = self.open()
