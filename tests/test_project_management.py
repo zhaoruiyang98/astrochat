@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -168,6 +169,53 @@ class ProjectStoreTests(ProjectFixture):
         self.store.finish(running, "done", now=101)
         self.assertEqual(self.store.claim_due(102).id, running.id)
 
+    def test_bulk_requests_persist_and_each_owned_project_is_claimed_once(self):
+        first = self.authorize(self.create())
+        second = self.authorize(self.create(name="second", number=2), "P_2")
+        other = self.authorize(self.create(user=11, channel=30), "P_3")
+        ticket = self.store.issue_ticket(10, "research")
+        first = self.store.get_owned(10, "research")
+        with self.store.connection:
+            self.store.connection.execute("UPDATE projects SET requested = 0, next_run = 10000")
+        for _ in range(2):
+            requested, skipped = self.store.request_all_owned(10)
+            self.assertEqual(requested, [first, second])
+            self.assertEqual(skipped, [])
+        self.assertEqual(self.store.ticket_project(ticket), first)
+        self.assertEqual(self.store.get_owned(11, "research"), other)
+        self.resources.close()
+        self.store = self.resources.enter_context(open_projects(self.path, "https://zulip/", "bot"))
+        claimed = []
+        for _ in range(2):
+            project = self.store.claim_due(100)
+            claimed.append(project.id)
+            self.store.finish(project, "done", now=100)
+        self.assertEqual(set(claimed), {first.id, second.id})
+        self.assertIsNone(self.store.claim_due(101))
+
+    def test_bulk_request_during_run_survives_completion(self):
+        self.authorize(self.create())
+        running = self.store.claim_due(100)
+        self.store.request_all_owned(10)
+        self.store.finish(running, "done", now=101)
+        self.assertEqual(self.store.claim_due(102).id, running.id)
+
+    def test_bulk_request_transaction_rolls_back_if_one_update_fails(self):
+        self.authorize(self.create())
+        self.authorize(self.create(name="second", number=2), "P_2")
+        with self.store.connection:
+            self.store.connection.execute("UPDATE projects SET requested = 0, next_run = 10000")
+        self.store.connection.executescript(
+            """CREATE TRIGGER fail_second_request BEFORE UPDATE OF requested ON projects
+               WHEN NEW.name = 'second'
+               BEGIN SELECT RAISE(ABORT, 'test request failure'); END;"""
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "test request failure"):
+            self.store.request_all_owned(10)
+        self.assertEqual(
+            self.store.connection.execute("SELECT sum(requested) FROM projects").fetchone()[0], 0
+        )
+
     def test_old_completion_never_overwrites_changed_or_removed_project(self):
         project = self.authorize(self.create())
         changed = self.store.change_owned(10, "research", channel_id=30)
@@ -231,6 +279,62 @@ class CommandTests(ProjectFixture):
         self.assertEqual(self.worker.mock_calls, [])
         self.assertEqual(self.store.get_owned(10, "research"), project)
         self.assertEqual(self.store.ticket_project(ticket), project)
+
+    def test_sync_all_only_queues_eligible_owned_projects_and_reports_skips(self):
+        self.authorize(self.create())
+        self.authorize(self.create(name="second", number=2), "P_2")
+        self.create(name="unauthorized")
+        self.authorize(self.create(name="paused", number=3), "P_3")
+        self.store.change_owned(10, "paused", enabled=False)
+        self.authorize(self.create(user=11, channel=30), "P_4")
+        self.authorize(self.create(user=11, name="foreign", channel=40), "P_5")
+        with self.store.connection:
+            self.store.connection.execute("UPDATE projects SET requested = 0, next_run = 10000")
+            self.store.connection.execute(
+                "UPDATE projects SET requested = 1 WHERE name = 'foreign'"
+            )
+        before = {
+            row["id"]: dict(row) for row in self.store.connection.execute("SELECT * FROM projects")
+        }
+        reply = self.commands.execute(10, "project sync --all")
+        self.assertIn("Sync requested for 2 of your projects: `research`, `second`", reply)
+        self.assertIn("Skipped `paused`: paused", reply)
+        self.assertIn("Skipped `unauthorized`: needs authorization", reply)
+        self.assertNotIn("foreign", reply)
+        self.assertIn("`project status`", reply)
+        for row in self.store.connection.execute("SELECT * FROM projects"):
+            expected = before[row["id"]]
+            if row["user_id"] == 10 and row["name"] in {"research", "second"}:
+                expected["requested"] = 1
+            self.assertEqual(dict(row), expected)
+        self.worker.wake.set.assert_called_once_with()
+        self.worker.changed.assert_not_called()
+        self.assertEqual(self.client.mock_calls, [])
+
+    def test_sync_all_without_owned_projects_does_not_queue_other_users_projects(self):
+        self.authorize(self.create(user=11))
+        with self.store.connection:
+            self.store.connection.execute("UPDATE projects SET requested = 0, next_run = 10000")
+        reply = self.commands.execute(10, "project sync --all")
+        self.assertIn("You have no projects", reply)
+        self.assertNotIn("research", reply)
+        self.assertIsNone(self.store.claim_due(100))
+        self.assertEqual(self.worker.mock_calls, [])
+        self.assertEqual(self.client.mock_calls, [])
+
+    def test_sync_all_when_every_project_is_paused_or_unauthorized_does_not_wake_worker(self):
+        self.create(name="unauthorized")
+        self.authorize(self.create(name="paused"))
+        self.store.change_owned(10, "paused", enabled=False)
+        with self.store.connection:
+            self.store.connection.execute("UPDATE projects SET requested = 0")
+        reply = self.commands.execute(10, "project sync --all")
+        self.assertIn("No syncs requested", reply)
+        self.assertIn("`project auth unauthorized`", reply)
+        self.assertIn("`project resume paused`", reply)
+        self.assertIsNone(self.store.claim_due(100))
+        self.assertEqual(self.worker.mock_calls, [])
+        self.assertEqual(self.client.mock_calls, [])
 
     def test_list_and_status_default_to_the_senders_own_projects(self):
         self.create()
@@ -320,6 +424,9 @@ class CommandTests(ProjectFixture):
             "status research --unknown",
             "status research second --all",
             "sync research --all",
+            "sync --all research",
+            "sync --all --all",
+            "sync --all --unknown",
             "auth research --all",
             "pause research --all",
             "remove research --all",

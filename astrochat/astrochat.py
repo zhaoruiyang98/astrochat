@@ -24,6 +24,7 @@ class AstroChatBot:
             "`project list [--all]`: list your projects; --all includes everyone's projects\n"
             "`project status [NAME] [--all]`: show your sync results; --all includes everyone\n"
             "`project sync NAME`: request a sync for your own project\n"
+            "`project sync --all`: sync all your authorized, unpaused projects\n"
             "Only the creator can configure, authorize, sync, pause or remove a project.\n"
             "`github help`: link GitHub usernames to Zulip users in a one-to-one DM\n"
             "`github link USERNAME [@USER]` / `github unlink [@USER]`: edit shared mappings\n"

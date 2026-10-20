@@ -283,6 +283,21 @@ class ProjectStore:
             )
             return project
 
+    def request_all_owned(self, user_id: int) -> tuple[list[Project], list[Project]]:
+        """Queue eligible owned projects atomically; return requested and skipped snapshots."""
+        with self.lock, self.connection:
+            projects = self.list_owned(user_id)
+            requested = [project for project in projects if project.authorized and project.enabled]
+            skipped = [
+                project for project in projects if not project.authorized or not project.enabled
+            ]
+            self.connection.execute(
+                """UPDATE projects SET requested = 1
+                   WHERE user_id = ? AND token IS NOT NULL AND enabled = 1""",
+                (user_id,),
+            )
+            return requested, skipped
+
     def issue_ticket(self, user_id: int, name: str, now: float | None = None) -> str:
         now = time.time() if now is None else now
         ticket = secrets.token_urlsafe(32)

@@ -24,6 +24,7 @@ USAGE = """Send project commands in a one-to-one DM with AstroChat.
 `project list [--all]`: list your projects; --all includes everyone's projects
 `project status [NAME] [--all]`: view your sync status; --all includes everyone's projects
 `project sync NAME`: request an immediate sync
+`project sync --all`: request syncs for all your authorized, unpaused projects
 `project pause NAME` / `project resume NAME`: stop / resume polling
 `project channel NAME "CHANNEL"`: change the destination
 `project confirm CODE` / `project cancel CODE`: create a missing public channel / cancel
@@ -139,6 +140,8 @@ class ProjectCommands:
                 return USAGE
             name = options[0].lower() if options else None
             return self.show_projects(user_id, name, all_users=all_users)
+        if action == "sync" and "--all" in args[1:]:
+            return self.sync_all(user_id) if args[1:] == ["--all"] else USAGE
         if action == "setup" and len(args) in {4, 5}:
             return self.setup(user_id, args)
         if len(args) < 2:
@@ -300,6 +303,26 @@ class ProjectCommands:
             return USAGE
         self.worker.changed(project.id)
         return reply + " Any in-flight request will finish before the current sync stops."
+
+    def sync_all(self, user_id: int) -> str:
+        requested, skipped = self.store.request_all_owned(user_id)
+        if not requested and not skipped:
+            return "You have no projects. Use `project setup` to create one."
+        lines = []
+        if requested:
+            self.worker.wake.set()
+            names = ", ".join(f"`{project.name}`" for project in requested)
+            lines.append(f"Sync requested for {len(requested)} of your projects: {names}.")
+            lines.append("The background worker will process them in turn. Use `project status`.")
+        else:
+            lines.append("No syncs requested.")
+        for project in skipped:
+            if not project.authorized:
+                reason = f"needs authorization; use `project auth {project.name}`"
+            else:
+                reason = f"paused; use `project resume {project.name}`"
+            lines.append(f"Skipped `{project.name}`: {reason}.")
+        return "\n".join(lines)
 
     def show_projects(
         self, user_id: int, name: str | None = None, *, all_users: bool = False

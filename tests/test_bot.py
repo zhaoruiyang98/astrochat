@@ -76,6 +76,22 @@ class BotTests(unittest.TestCase):
         )
         self.projects.execute.assert_not_called()
 
+    def test_sync_all_is_routed_with_sender_id_only_in_a_one_to_one_dm(self):
+        self.events(self.event("@**AstroChat** project sync --all", ["mentioned"]))
+        self.projects.execute.assert_not_called()
+        self.events(
+            self.event(
+                "project sync --all",
+                type="private",
+                display_recipient=[
+                    {"id": 1, "email": "bot@example.com"},
+                    {"id": 2, "email": "alice@example.com"},
+                ],
+            )
+        )
+        self.projects.execute.assert_called_once_with(2, "project sync --all")
+        self.assertIn("project sync --all", self.bot.usage())
+
     def test_private_command_preserves_case_and_uses_message_sender(self):
         self.bot.handle_message(
             {

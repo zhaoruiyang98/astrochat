@@ -102,6 +102,7 @@ SVG 等暂未支持的图片格式也会使该任务报错，可改用上述格�
 | `project status [NAME]` | 查看自己的全部或指定名称配置的状态 |
 | `project status [NAME] --all` | 查看所有用户的状态；提供名称时显示所有同名配置 |
 | `project sync NAME` | 请求后台尽快同步自己的指定项目 |
+| `project sync --all` | 批量请求同步自己所有已授权、未暂停的项目，列出跳过的项目及原因 |
 | `project auth NAME` | 获取新授权链接，也用于更换 token |
 | `project channel NAME "CHANNEL"` | 更改目标 Channel |
 | `project confirm CODE` | 确认创建公有频道，并继续刚才的配置操作；`CODE` 使用 bot 提供的确认码 |
@@ -256,6 +257,17 @@ project status research
 需要提前同步时，发送 `project sync research`。它会请求后台尽快执行，完成情况仍通过 `project status research` 查看。
 如果项目已暂停，需要先发送 `project resume research`。
 
+批量请求同步自己的所有项目时，发送：
+
+```text
+project sync --all
+```
+
+bot 会请求后台依次同步你创建的所有已授权、未暂停项目，并列出未授权或已暂停的项目及跳过原因。
+它不会恢复暂停的项目，也不会同步其他用户的项目。请求入队后立即回复，完成情况通过 `project status` 查看。
+这里的 `--all` 表示自己的全部项目；`project list --all` 和 `project status --all` 则用于查看所有用户的项目。
+`project sync --all` 不能与项目名称同时使用。
+
 ### 查看自己的项目与所有人的项目
 
 `project list` 和 `project status` 默认只展示自己的配置。
@@ -401,6 +413,9 @@ SIGINT / SIGTERM 会等待正在进行的授权验证、同步请求和状态提
 聊天命令、后台同步使用独立的 API 会话；授权验证为每次请求建立 GitHub 会话。
 
 `project sync NAME` 在配置库中记录同步请求并唤醒后台线程，聊天处理不会等待同步完成。
+`project sync --all` 在一个 SQLite 事务中，按发送者用户 ID 将已授权、未暂停的配置标记为待同步，
+提交成功后唤醒后台线程；不修改配置、授权链接或其他用户的请求状态。
+重复请求合并为一个待同步标记；正在同步的项目会在本轮完成后再同步一轮。
 后台只调度已授权且未暂停的配置，按各自周期依次执行，并保存结果供 `project status` 查询。
 单个任务或 Project 失败会保留已有记录并在后续轮询重试，其余任务和 Project 继续处理。
 
@@ -420,7 +435,8 @@ GitHub 原始正文仍经 Markdown 转换与提及中和，只有 bot 根据保�
 ### 用户权限与网页授权
 
 配置所有权取自 Zulip 消息发送者的用户 ID，用户显示名称变化或重名不会改变所有权。
-查询默认限定当前用户，`--all` 开放查看所有配置；修改类命令始终按发送者查找自己的配置。
+查询默认限定当前用户，查询命令的 `--all` 开放查看所有配置；修改类命令始终按发送者查找自己的配置。
+`project sync --all` 也只选择发送者自己的项目。
 创建者名称通过 Zulip 用户列表接口批量获取，每次非空查询只请求一次；无法获取时回退为用户 ID。
 
 用户和 bot 都必须是目标 Channel 的有效成员，保存配置、更改目标和每轮同步都会检查。
