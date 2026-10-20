@@ -72,6 +72,8 @@ class Discussion:
     kind: str
     is_event: bool = False
     status_change: tuple[str, str] | None = None
+    assignment: tuple[str, str] | None = None
+    assignees_change: tuple[tuple[str, ...], tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,7 @@ def activity(node: dict[str, Any], task: Task) -> Discussion | None:
     """Turn a timeline event into literal text, scoped to this Project."""
     actor = (node.get("actor") or {}).get("login", "deleted-user")
     status_change = None
+    assignment = None
     if node["__typename"] == "ProjectV2ItemStatusChangedEvent":
         if (node["project"] or {}).get("id") != task.project_id:
             return None
@@ -118,6 +121,7 @@ def activity(node: dict[str, Any], task: Task) -> Discussion | None:
         assignee = (node["assignee"] or {}).get("login", "deleted-user")
         action = "Assigned to" if node["__typename"] == "AssignedEvent" else "Unassigned from"
         body, kind = f"{action} {assignee}", "Assignment"
+        assignment = (action, assignee)
     return Discussion(
         node["id"],
         body,
@@ -127,6 +131,7 @@ def activity(node: dict[str, Any], task: Task) -> Discussion | None:
         kind,
         True,
         status_change=status_change,
+        assignment=assignment,
     )
 
 

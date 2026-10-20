@@ -507,6 +507,29 @@ class WorkerTests(ProjectFixture):
                 runner(project, Event())
             github.assert_not_called()
 
+    def test_runner_refreshes_shared_account_snapshot_for_each_project_and_poll(self):
+        first = self.authorize(self.create())
+        second = self.authorize(self.create(user=11, channel=30), "P_2")
+        client = Mock()
+        client.call_endpoint.return_value = {"result": "success", "subscribers": [1, 10, 11]}
+        runner = SyncRunner(self.store, self.path, client, 1)
+        self.store.set_github_account(10, "Alice", 11)
+        with (
+            patch("astrochat.project_commands.GitHubClient"),
+            patch("astrochat.project_commands.ProjectSync") as sync,
+        ):
+            for project in (first, second):
+                runner(project, Event())
+                self.assertEqual(sync.call_args.args[4], {"alice": 10})
+            self.store.set_github_account(10, None, 11)
+            self.store.set_github_account(11, "Alice", 10)
+            runner(first, Event())
+            self.assertEqual(sync.call_args.args[4], {"alice": 11})
+            self.store.set_github_account(11, None, 10)
+            runner(first, Event())
+            self.assertEqual(sync.call_args.args[4], {})
+        client.get_members.assert_not_called()
+
     def test_runner_namespaces_state_and_restores_the_same_channel_mapping(self):
         first = self.authorize(self.create())
         second = self.authorize(self.create(user=11, channel=30), "P_1")

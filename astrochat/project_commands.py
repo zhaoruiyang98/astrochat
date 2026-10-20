@@ -368,4 +368,7 @@ class SyncRunner:
             github = GitHubClient(self.store.token_for(project), session)
             if stop.is_set():
                 return SyncResult()
-            return ProjectSync(config, github, self.client, state).run_once(stop)
+            github_users = {
+                account.github_login: account.user_id for account in self.store.github_accounts()
+            }
+            return ProjectSync(config, github, self.client, state, github_users).run_once(stop)

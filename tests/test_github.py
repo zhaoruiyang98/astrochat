@@ -256,6 +256,14 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual(entries[1].author, "deleted-user")
         self.assertEqual(entries[0].created_at, "2026-10-18T00:01:00Z")
         self.assertTrue(all(entry.is_event for entry in entries))
+        self.assertEqual(
+            [entry.assignment for entry in entries],
+            [
+                ("Assigned to", "bob"),
+                ("Unassigned from", "bob"),
+                ("Assigned to", "deleted-user"),
+            ],
+        )
 
     def test_assignee_pages_are_not_silently_truncated_and_unset_status_is_supported(self):
         source = item(

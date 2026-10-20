@@ -136,6 +136,124 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(self.client.messages), 2)
         self.assertIn("alice", self.client.messages[1]["content"])
 
+    def test_account_mapping_changes_update_existing_messages_without_new_posts_or_topic_moves(
+        self,
+    ):
+        task = replace(self.task, assignees=("Alice", "bob"))
+        self.github.tasks.return_value = ([task], 0)
+        self.service.run_once()
+        topic = self.client.messages[1]["topic"]
+        self.client.messages[999] = {"content": "local reply", "topic": topic}
+        for mapping, expected in (
+            ({"alice": 10}, 2),
+            ({"alice": 10}, 0),
+            ({"alice": 11}, 2),
+            ({}, 2),
+        ):
+            with self.subTest(mapping=mapping):
+                self.reload()
+                self.service = ProjectSync(
+                    self.config, self.github, self.client, self.state, mapping
+                )
+                result = self.service.run_once()
+                self.assertEqual((result.sent, result.updated, result.renamed), (0, expected, 0))
+                self.assertEqual(set(self.client.messages), {1, 2, 999})
+                self.assertEqual(self.client.messages[999]["content"], "local reply")
+                self.assertEqual(self.client.messages[1]["topic"], topic)
+                for message_id in (1, 2):
+                    content = self.client.messages[message_id]["content"]
+                    self.assertNotIn("@**", content)
+                    if mapping:
+                        self.assertIn(f"@_**|{mapping['alice']}**", content)
+                        self.assertNotIn("alice", content.lower())
+                    else:
+                        self.assertNotIn("@_**", content)
+                if mapping:
+                    self.assertIn(
+                        f"Assignees: @_**|{mapping['alice']}**, bob",
+                        self.client.messages[1]["content"],
+                    )
+
+    def test_author_and_assignment_mappings_are_silent_and_do_not_rewrite_body_mentions(self):
+        task = replace(self.task, assignees=("ALICE", "unknown"))
+        accounts = {"alice": 10, "bob": 11}
+        for kind in ("Issue", "PullRequest", "DraftIssue", "Comment", "Review", "Review comment"):
+            entry = replace(
+                self.body,
+                kind=kind,
+                body="GitHub @alice and @**all** and @_**|11** remain source text.",
+            )
+            content = render(task, entry, github_users=accounts)
+            self.assertIn(f"**{kind}** · @_**|10** ·", content)
+            self.assertIn("Assignees: @_**|10**, unknown", content)
+            self.assertNotIn("alice", content.split("[View on GitHub]")[0].lower())
+            self.assertIn("GitHub @alice", content)
+            self.assertNotIn("@**", content)
+            self.assertNotIn("@_**|11**", content)
+        for action in ("Assigned to", "Unassigned from"):
+            event = replace(
+                self.comment, is_event=True, assignment=(action, "bob"), body=f"{action} bob"
+            )
+            content = render(task, event, github_users=accounts)
+            self.assertTrue(content.endswith(f"{action} @_**|11**"))
+            self.assertNotIn("@**", content)
+        event = replace(
+            self.comment, is_event=True, body="", status_change=("Backlog", "In progress")
+        )
+        self.assertIn("**Comment** · @_**|10** ·", render(task, event, github_users=accounts))
+        self.assertTrue(
+            render(task, event, github_users=accounts).endswith("**Backlog** → **In progress**")
+        )
+
+    def test_assignment_event_mapping_refreshes_on_next_poll(self):
+        event = replace(
+            self.comment,
+            id="E_1",
+            is_event=True,
+            body="Assigned to bob",
+            assignment=("Assigned to", "bob"),
+        )
+        self.github.discussions.return_value = [self.body, event]
+        self.service.run_once()
+        self.service = ProjectSync(self.config, self.github, self.client, self.state, {"bob": 11})
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.updated), (0, 1))
+        self.assertTrue(self.client.messages[2]["content"].endswith("Assigned to @_**|11**"))
+        self.assertEqual(self.service.run_once().updated, 0)
+
+    def test_draft_assignment_observation_uses_silent_labels_but_does_not_invent_actor(self):
+        draft = replace(self.task, type="DraftIssue", assignees=("alice",))
+        self.github.tasks.return_value = ([draft], 0)
+        self.github.discussions.return_value = [self.body]
+        self.service = ProjectSync(
+            self.config,
+            self.github,
+            self.client,
+            self.state,
+            {"alice": 10, "bob": 11, "astrochat": 12},
+        )
+        self.service.run_once()
+        self.github.tasks.return_value = ([replace(draft, assignees=("bob",))], 0)
+        self.assertEqual(self.service.run_once().sent, 1)
+        notification = self.client.messages[2]["content"]
+        self.assertIn("Assignees: @_**|10** → @_**|11**", notification)
+        self.assertNotIn("alice", notification)
+        self.assertNotIn("bob", notification)
+        self.assertNotIn("|12", notification)
+        self.assertNotIn("@**", notification)
+        self.assertEqual(self.service.run_once().sent, 0)
+
+    def test_account_mapping_preview_does_not_edit_messages_or_state(self):
+        self.service.run_once()
+        original = {key: dict(value) for key, value in self.client.messages.items()}
+        before = self.path.read_bytes()
+        self.reload(dry_run=True)
+        self.service = ProjectSync(self.config, self.github, self.client, self.state, {"alice": 10})
+        result = self.service.run_once()
+        self.assertEqual((result.sent, result.updated), (0, 2))
+        self.assertEqual(self.client.messages, original)
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_project_fields_update_only_the_first_message_and_preserve_ids_after_restart(self):
         self.service.run_once()
         self.client.messages[999] = {"content": "local reply", "topic": topic_name(self.task)}

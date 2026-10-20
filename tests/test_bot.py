@@ -15,7 +15,8 @@ class BotTests(unittest.TestCase):
     def setUp(self):
         self.handler = Mock(user_id=1, email="bot@example.com", full_name="AstroChat")
         self.projects = Mock()
-        self.bot = AstroChatBot(self.projects)
+        self.github = Mock()
+        self.bot = AstroChatBot(self.projects, self.github)
         self.events = ChatEvents(self.bot, self.handler)
 
     def event(self, content, flags=None, **changes):
@@ -105,6 +106,48 @@ class BotTests(unittest.TestCase):
         self.assertIn("not configured", self.handler.send_reply.call_args.args[1])
         bot.handle_message({"content": "hello", "sender_id": 2}, self.handler)
         self.handler.react.assert_called_once()
+
+    def test_private_github_command_preserves_target_mention_and_records_actual_sender(self):
+        self.github.execute.return_value = "GitHub mapping updated"
+        self.events(
+            self.event(
+                "github link AliceGH @**Bob Smith|3**",
+                type="private",
+                display_recipient=[
+                    {"id": 1, "email": "bot@example.com"},
+                    {"id": 2, "email": "alice@example.com"},
+                ],
+            )
+        )
+        self.github.execute.assert_called_once_with(2, "github link AliceGH @**Bob Smith|3**")
+        self.projects.execute.assert_not_called()
+        self.assertEqual(self.handler.send_reply.call_args.args[1], "GitHub mapping updated")
+
+    def test_github_commands_in_channels_and_group_dms_only_request_private_chat(self):
+        self.events(self.event("@**AstroChat** github link alice @**Bob|3**", ["mentioned"]))
+        self.events(
+            self.event(
+                "@**AstroChat** github unlink @**Bob|3**",
+                ["mentioned"],
+                type="private",
+                display_recipient=[{"id": 1}, {"id": 2}, {"id": 3}],
+            )
+        )
+        self.github.execute.assert_not_called()
+        self.assertIn("one-to-one DM", self.handler.send_reply.call_args.args[1])
+
+    def test_github_help_and_legacy_plugin_without_mapping_configuration(self):
+        self.assertIn("github link", self.bot.usage())
+        AstroChatBot().handle_message(
+            {
+                "content": "github list",
+                "sender_id": 2,
+                "type": "private",
+                "display_recipient": [{"id": 1}, {"id": 2}],
+            },
+            self.handler,
+        )
+        self.assertIn("not configured", self.handler.send_reply.call_args.args[1])
 
 
 class CliTests(unittest.TestCase):

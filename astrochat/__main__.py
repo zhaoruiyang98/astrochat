@@ -18,6 +18,7 @@ from zulip_bots.lib import (
 
 from astrochat.astrochat import AstroChatBot
 from astrochat.authorization import Authorization, AuthorizationServer, create_app
+from astrochat.github_commands import GitHubCommands
 from astrochat.project_commands import ProjectCommands, SyncRunner, auth_origin
 from astrochat.project_store import open_projects
 from astrochat.project_sync import checked
@@ -71,7 +72,10 @@ def run(args: argparse.Namespace) -> int:
         command_client = zulip.Client(config_file=args.zulip_config, retry_on_errors=False)
         resources.callback(command_client.session.close)
         handler = ExternalBotHandler(chat_client, None, {"name": "AstroChat"})
-        bot = AstroChatBot(ProjectCommands(store, worker, command_client, bot_id, public_url))
+        bot = AstroChatBot(
+            ProjectCommands(store, worker, command_client, bot_id, public_url),
+            GitHubCommands(store, command_client),
+        )
         worker.thread.start()
         resources.callback(worker.close)
         server = AuthorizationServer(

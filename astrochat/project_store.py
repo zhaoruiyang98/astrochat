@@ -1,4 +1,4 @@
-"""User-owned project settings and expiring authorization links in SQLite."""
+"""Project settings, shared account mappings and authorization links in SQLite."""
 
 import fcntl
 import hashlib
@@ -20,7 +20,19 @@ class ProjectError(ValueError):
     """An error safe to show to the user; never include credentials here."""
 
 
-SCHEMA = """
+ACCOUNT_SCHEMA = """
+    CREATE TABLE github_accounts (
+        user_id INTEGER PRIMARY KEY,
+        github_login TEXT COLLATE NOCASE UNIQUE,
+        updated_by INTEGER NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    PRAGMA user_version = 2;
+"""
+
+
+SCHEMA = (
+    """
     BEGIN;
     CREATE TABLE identity (id INTEGER PRIMARY KEY CHECK (id = 1), site TEXT, bot TEXT);
     CREATE TABLE projects (
@@ -51,12 +63,21 @@ SCHEMA = """
         expires REAL NOT NULL
     );
     CREATE INDEX schedule ON projects (enabled, next_run);
-    PRAGMA user_version = 1;
 """
+    + ACCOUNT_SCHEMA
+)
 
 PROJECT_COLUMNS = """id, user_id, name, owner, owner_type, number, url, github_id,
     channel, channel_id, interval_seconds, enabled, revision, status,
     token IS NOT NULL AS authorized"""
+
+
+@dataclass(frozen=True)
+class GitHubAccount:
+    user_id: int
+    github_login: str | None
+    updated_by: int
+    updated_at: float
 
 
 @dataclass(frozen=True)
@@ -92,8 +113,59 @@ class ProjectStore:
         if version == 0:
             with connection:
                 connection.executescript(SCHEMA)
-        elif version != 1:
+        elif version == 1:
+            with connection:
+                connection.executescript("BEGIN;\n" + ACCOUNT_SCHEMA)
+        elif version != 2:
             raise ValueError(f"Unsupported project registry version: {version}")
+
+    def github_account(self, user_id: int) -> GitHubAccount | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM github_accounts WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return GitHubAccount(**dict(row)) if row is not None else None
+
+    def github_accounts(self) -> list[GitHubAccount]:
+        with self.lock:
+            rows = self.connection.execute(
+                """SELECT * FROM github_accounts WHERE github_login IS NOT NULL
+                   ORDER BY github_login"""
+            ).fetchall()
+            return [GitHubAccount(**dict(row)) for row in rows]
+
+    def set_github_account(
+        self, user_id: int, login: str | None, updated_by: int
+    ) -> tuple[GitHubAccount | None, GitHubAccount]:
+        # A NULL login keeps the last unlink's author/time without reserving a name.
+        account = GitHubAccount(user_id, login.lower() if login else None, updated_by, time.time())
+        with self.lock:
+            try:
+                with self.connection:
+                    previous = self.github_account(user_id)
+                    self.connection.execute(
+                        """INSERT INTO github_accounts VALUES (?, ?, ?, ?)
+                           ON CONFLICT(user_id) DO UPDATE SET
+                           github_login = excluded.github_login,
+                           updated_by = excluded.updated_by, updated_at = excluded.updated_at""",
+                        (
+                            account.user_id,
+                            account.github_login,
+                            account.updated_by,
+                            account.updated_at,
+                        ),
+                    )
+            except sqlite3.IntegrityError:
+                owner = self.connection.execute(
+                    "SELECT user_id FROM github_accounts WHERE github_login = ?", (login,)
+                ).fetchone()
+                if owner is None:
+                    raise
+                raise ProjectError(
+                    f"That GitHub username is already linked to Zulip user ID {owner[0]}. "
+                    "Use `github unlink @USER` for that user before assigning it elsewhere."
+                ) from None
+        return previous, account
 
     def bind(self, site: str, bot: str) -> None:
         with self.lock, self.connection:

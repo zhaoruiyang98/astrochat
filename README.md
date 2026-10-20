@@ -9,7 +9,7 @@
 
 ## 普通用户指南
 
-本部分面向使用已部署 AstroChat 的用户。你只需要在 Zulip 中与 bot 对话，并通过授权网页提交 GitHub token。
+本部分面向使用已部署 AstroChat 的用户。你只需要在 Zulip 中与 bot 对话；配置 Project 同步时，通过授权网页提交 GitHub token。
 
 ### AstroChat 能做什么
 
@@ -25,6 +25,8 @@
 - 每个用户可以配置多个 Project，分别设置目标 Channel、token 和同步周期。
 - 目标 Channel 不存在时，私信询问是否创建公有频道；确认后自动加入用户和 bot。
 - 默认查看自己的项目，添加 `--all` 可查看所有用户的项目及创建者；只有创建者能管理自己的配置。
+- 共同维护 GitHub 用户名与 Zulip 用户的映射，可以给自己或他人设置，无需验证 GitHub 账号归属。
+  同步消息中的作者、负责人和分配事件会显示关联的 Zulip 用户，不触发提及通知。
 
 同步方向是 GitHub → Zulip。在 Zulip 中的回复不会写回 GitHub，也不会更新 GitHub Project 的状态字段。
 
@@ -79,8 +81,8 @@ SVG 等暂未支持的图片格式也会使该任务报错，可改用上述格�
 
 ### 从哪里发送命令
 
-所有 `project ...` 命令都需要在与 AstroChat 的**一对一私信**中发送。
-在 Channel 或群聊中提及 bot 并发送 Project 命令，只会收到私聊提示。
+所有 `project ...` 和 `github ...` 命令都需要在与 AstroChat 的**一对一私信**中发送。
+在 Channel 或群聊中提及 bot 并发送这些命令，只会收到私聊提示。
 
 `help` 和普通聊天可以通过私信发送，也可以在消息开头提及 bot，例如 `@AstroChat help`。
 提及时请从 Zulip 的候选列表中选择实际的 bot 账号。
@@ -108,6 +110,49 @@ SVG 等暂未支持的图片格式也会使该任务报错，可改用上述格�
 | `project pause NAME` | 暂停同步 |
 | `project resume NAME` | 恢复同步 |
 | `project remove NAME` | 删除配置和已保存的 token，保留 Channel 和已发送到 Zulip 的消息 |
+| `github help` | 显示账号映射命令说明 |
+| `github link USERNAME [@USER]` | 设置自己或指定 Zulip 用户的 GitHub 用户名 |
+| `github status [@USER]` | 查看自己或指定用户的映射及最后修改记录 |
+| `github list` | 查看所有已关联的账号及最后修改记录 |
+| `github unlink [@USER]` | 解除自己或指定用户的关联 |
+
+### 关联 GitHub 与 Zulip 用户
+
+在与 bot 的一对一私信中发送：
+
+```text
+github link zhaoruiyang98
+```
+
+这会将 `zhaoruiyang98` 关联到你当前的 Zulip 账号。给别人设置时，在末尾添加用户提及：
+
+```text
+github link zhaoruiyang98 @张三
+github status @张三
+github unlink @张三
+```
+
+这里的 `@张三` 需要输入 `@` 后从 Zulip 的候选列表选择，不能只输入普通文本。
+名字包含空格时无需加引号；重名用户应选择带用户 ID 的提及。也支持通过 `@_` 选择的静默提及。
+省略用户提及时操作自己，`github list` 列出所有已关联用户。
+
+任何用户都可以创建、修改或解除任何人的映射，不需要 token 或授权页验证，也不检查 GitHub 账号是否存在。
+用户名只接受 1–39 个英文字母、数字或单个连字符，首尾不能是连字符；大小写不区分。
+每个 Zulip 用户只能关联一个 GitHub 账号，重新 `link` 会替换原值，bot 会回复旧值和新值。
+同一个 GitHub 用户名不能同时关联多个 Zulip 用户；发生冲突时保留原映射，先对原用户执行 `github unlink` 才能转给别人。
+记录按 Zulip 用户 ID 保存，修改显示名称不影响关联；查询会显示最后修改者和修改时间（UTC）。
+解除关联后仍保留最后修改记录，可用 `github status @USER` 查看，但不会出现在 `github list` 中。
+
+映射由这个 bot 的所有 Project 共用。同步消息中的作者、负责人和分配事件在存在映射时只显示对应的 Zulip 用户名，
+例如 GitHub 用户 `alice` 关联张三后显示为 `张三`；未关联的账号仍显示 GitHub 用户名。
+关联用户通过 Zulip 的[静默提及](https://zulip.com/help/mention-a-user-or-group#silently-mention-a-user)展示，
+可以查看其用户信息，但不会因为这处提及触发通知；频道或 Topic 原有的通知设置仍然适用。
+正文里的 GitHub `@用户名` 保持原文，不会自动转换为 Zulip 提及。
+
+创建、更换或解除映射后，任务摘要、评论、Review 和 Issue / PR 历史事件会在对应 Project 的下一轮同步中更新，
+保留消息 ID 和本地回复；也可以对自己的项目发送 `project sync NAME` 提前更新。
+草稿的历史轮询通知保留生成时的显示，新通知采用当前映射。
+这些映射只影响用户展示，不改变 Project 的配置所有权或 GitHub 访问凭据。
 
 ### 创建 GitHub PAT
 
@@ -340,9 +385,10 @@ SIGINT / SIGTERM 会等待正在进行的授权验证、同步请求和状态提
 | [__main__.py](astrochat/__main__.py) | `python -m astrochat` 的入口，解析参数、初始化资源、启动服务并处理退出 |
 | [astrochat.py](astrochat/astrochat.py) | 处理聊天消息、帮助命令和一对一私信路由 |
 | [project_commands.py](astrochat/project_commands.py) | 解析 Project 命令、检查操作权限和 Channel 成员资格，构造同步任务 |
+| [github_commands.py](astrochat/github_commands.py) | 解析共享账号映射命令，解析 Zulip 用户提及，展示映射和最后修改记录 |
 | [channel_creation.py](astrochat/channel_creation.py) | 区分频道不存在与查询失败，保存确认请求的数据结构，通过 Zulip API 创建公有频道 |
 | [authorization.py](astrochat/authorization.py) 与 [static/](astrochat/static/) | 提供 token 提交页面、验证授权链接和 GitHub Project 读取权限 |
-| [project_store.py](astrochat/project_store.py) | 管理用户配置、加密 token、授权链接摘要和调度状态 |
+| [project_store.py](astrochat/project_store.py) | 管理用户配置、加密 token、授权链接摘要、调度状态和共享账号映射 |
 | [sync_worker.py](astrochat/sync_worker.py) | 按各配置的周期调度同步，处理手动请求、取消和失败重试 |
 | [config.py](astrochat/config.py) | 定义单次同步使用的运行时配置，由已保存的 Project 配置构建 |
 | [github.py](astrochat/github.py) | 通过 GitHub GraphQL API 分页读取项目、任务及讨论 |
@@ -357,6 +403,19 @@ SIGINT / SIGTERM 会等待正在进行的授权验证、同步请求和状态提
 `project sync NAME` 在配置库中记录同步请求并唤醒后台线程，聊天处理不会等待同步完成。
 后台只调度已授权且未暂停的配置，按各自周期依次执行，并保存结果供 `project status` 查询。
 单个任务或 Project 失败会保留已有记录并在后续轮询重试，其余任务和 Project 继续处理。
+
+`github link` / `github unlink` 在同一事务中更新映射和最后修改者、时间，操作者来自 Zulip 消息发送者 ID。
+这些命令允许所有用户修改他人的映射，但不会调用 Project 配置、授权或调度的修改接口。
+命令通过 Zulip 用户列表解析完整提及；带 ID 的提及检查名称与 ID 是否一致，未带 ID 的重名提及会被拒绝。
+
+每轮 Project 同步开始时，从配置库读取一份共享映射快照并显式传给 `ProjectSync`。
+存在映射时，消息头中的作者、任务负责人及结构化分配事件只使用 `@_**|ZULIP_USER_ID**`；
+Zulip 按 ID 渲染当前用户名称，使用静默提及，避免额外的用户列表请求和提及通知。
+参见 [Zulip 消息格式](https://zulip.com/api/message-formatting#mentions-and-silent-mentions)及
+[Zulip 12 的提及实现](https://github.com/zulip/zulip/blob/12.0/zerver/lib/markdown/__init__.py)。
+GitHub 原始正文仍经 Markdown 转换与提及中和，只有 bot 根据保存的映射生成静默提及。
+映射变更通过现有内容哈希检查更新镜像；进行中的一轮使用原快照，下一轮读取新映射。
+草稿观察记录只保存当前基线，过去的观察通知不重新生成。
 
 ### 用户权限与网页授权
 
@@ -394,12 +453,15 @@ SQLite 数据库自动创建，无需运行额外数据库服务。默认目录�
 
 ```text
 .astrochat/
-  projects.sqlite3       # 用户配置、加密 token、授权链接摘要、调度状态
+  projects.sqlite3       # 用户配置、加密 token、授权链接摘要、调度状态、账号映射
   token.key              # token 加密密钥，文件权限为 0600
   states/*.sqlite3       # Topic、消息/事件映射、哈希、图片映射和草稿观察记录
 ```
 
 配置库由聊天、授权和调度线程共享，通过锁保护访问，并使用短事务；网络请求不在数据库事务内执行。
+配置库使用 schema 2，自动升级 schema 1，保留项目、加密 token、授权链接和调度状态。
+`github_accounts` 以 Zulip 用户 ID 为主键，GitHub 用户名使用不区分大小写的唯一约束；
+保存最后修改者的用户 ID 和 UTC 时间戳。解除关联时将用户名置空，保留修改记录并释放该用户名。
 消息检查点按配置与 Channel 分开保存，按任务查询映射，每次成功修改一条 Zulip 消息后提交对应记录，
 不需要整体重写状态文件。重启后继续使用已保存的配置、token、调度状态和消息映射。
 图片上传成功后立即提交原地址 SHA-256 → Zulip 附件地址的映射；随后消息发送失败也能复用已上传的图片。
@@ -527,7 +589,7 @@ uv run python -m astrochat --zulip-config zuliprc --once
 
 正文中的 Zulip 提及语法会被中和，避免同步内容触发点名通知；代码中的文本保持原样。
 普通括号、花括号和反斜杠不额外转义；需要显示为字面的 Markdown 符号使用字符实体，避免 Zulip 显示多余的反斜杠。
-GitHub 用户名、Issue 编号简写不会自动映射为 Zulip 用户或 GitHub 链接。
+正文中的 GitHub 用户名、Issue 编号简写不会自动映射为 Zulip 用户或 GitHub 链接。
 相对地址转换不推断仓库的默认分支，因此仓库文件链接建议在 GitHub 原文中使用完整 URL。
 
 拆分优先选择完整段落或代码块，每条消息（含分段编号）不超过 10,000 字符。

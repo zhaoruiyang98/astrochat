@@ -40,16 +40,47 @@ def topic_name(task: Task, project_id: str | None = None, hash_length: int = 3) 
     return prefix + title[: 60 - len(prefix) - len(suffix)].rstrip() + suffix
 
 
-def render(task: Task, entry: Discussion, image_urls: dict[str, str] | None = None) -> str:
-    heading = f"**{escape_text(entry.kind)}** · {escape_text(entry.author)} · {escape_text(entry.created_at)}"
+def render_user(login: str, github_users: dict[str, int]) -> str:
+    user_id = github_users.get(login.lower())
+    if user_id is None:
+        return escape_text(login)
+    # ID-only silent mentions let Zulip resolve the current name without a user-list
+    # request for every sync, and cannot turn user-controlled names into markup.
+    return f"@_**|{user_id}**"
+
+
+def render_assignees(assignees: tuple[str, ...], github_users: dict[str, int]) -> str:
+    return ", ".join(render_user(login, github_users) for login in assignees) or "(unassigned)"
+
+
+def render(
+    task: Task,
+    entry: Discussion,
+    image_urls: dict[str, str] | None = None,
+    github_users: dict[str, int] | None = None,
+) -> str:
+    github_users = github_users or {}
+    author = render_user(entry.author, github_users)
+    if task.type == "DraftIssue" and entry.is_event:
+        author = escape_text(entry.author)  # AstroChat observes drafts; it is not the GitHub actor.
+    heading = f"**{escape_text(entry.kind)}** · {author} · {escape_text(entry.created_at)}"
     if entry.id == task.id:
         heading += f"\n**{escape_text(task.title)}**"
         heading += f"\nProject status: {escape_text(task.status or '(unset)')}"
-        heading += f"\nAssignees: {escape_text(', '.join(task.assignees) or '(unassigned)')}"
+        heading += f"\nAssignees: {render_assignees(task.assignees, github_users)}"
         for name, value in task.project_fields:
             heading += f"\n{escape_text(name)}: {escape_text(value or '(unset)')}"
     if entry.is_event:
         body = escape_text(entry.body)
+        if entry.assignment is not None:
+            action, login = entry.assignment
+            body = f"{escape_text(action)} {render_user(login, github_users)}"
+        if entry.assignees_change is not None:
+            previous_assignees, current_assignees = entry.assignees_change
+            body = (
+                f"Assignees: {render_assignees(previous_assignees, github_users)} → "
+                f"{render_assignees(current_assignees, github_users)}"
+            )
         if entry.status_change is not None:
             previous, current = entry.status_change
             transition = f"**{escape_text(previous)}** → **{escape_text(current)}**"
@@ -83,12 +114,18 @@ class SyncResult:
 
 class ProjectSync:
     def __init__(
-        self, config: SyncConfig, github: GitHubClient, client: zulip.Client, state: SyncState
+        self,
+        config: SyncConfig,
+        github: GitHubClient,
+        client: zulip.Client,
+        state: SyncState,
+        github_users: dict[str, int] | None = None,
     ) -> None:
         self.config = config
         self.github = github
         self.client = client
         self.state = state
+        self.github_users = dict(github_users or {})
 
     def run_once(self, stop: Event | None = None) -> SyncResult:
         project = self.github.project(
@@ -152,7 +189,8 @@ class ProjectSync:
         topic = self.sync_topic(task, messages, channel_id, result, reserved_topics)
         current_keys = set()
         for entry in entries:
-            for part, content in enumerate(split_message(render(task, entry, image_urls))):
+            content = render(task, entry, image_urls, self.github_users)
+            for part, content in enumerate(split_message(content)):
                 if stop is not None and stop.is_set():
                     return
                 key = f"{'event:' if entry.is_event else ''}{entry.id}:{part}"
@@ -185,29 +223,29 @@ class ProjectSync:
         if previous is None:
             self.state.save_observation(task.id, Observation(task.status, assignees, 0))
             return
-        changes = []
+        assignees_change = None
         status_change = None
         if previous.status != task.status:
             status_change = (previous.status or "(unset)", task.status or "(unset)")
         if previous.assignees != assignees:
-            changes.append(
-                f"Assignees: {', '.join(previous.assignees) or '(unassigned)'} → "
-                f"{', '.join(assignees) or '(unassigned)'}"
-            )
-        if not changes and status_change is None:
+            assignees_change = (previous.assignees, assignees)
+        if assignees_change is None and status_change is None:
             return
         sequence = previous.sequence + 1
         entry = Discussion(
             f"observation:{sequence}",
-            "\n".join(changes),
+            "",
             task.description.url,
             "AstroChat",
             datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "Observed draft change (polling time; actor unavailable)",
             True,
             status_change=status_change,
+            assignees_change=assignees_change,
         )
-        for part, content in enumerate(split_message(render(task, entry))):
+        for part, content in enumerate(
+            split_message(render(task, entry, github_users=self.github_users))
+        ):
             self.sync_message(
                 task.id, messages, f"event:{entry.id}:{part}", content, channel_id, topic, result
             )
